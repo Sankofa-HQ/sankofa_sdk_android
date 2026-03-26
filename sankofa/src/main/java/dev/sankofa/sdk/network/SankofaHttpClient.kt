@@ -9,7 +9,6 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
-import java.util.zip.GZIPOutputStream
 
 /**
  * A thin OkHttp wrapper that handles batch serialization, GZIP compression,
@@ -43,11 +42,9 @@ internal class SankofaHttpClient(
 
         var allSuccess = true
 
-        if (trackEvents.isNotEmpty()) {
-            allSuccess = allSuccess && post(trackEndpoint, trackEvents)
-        }
-        aliasEvents.forEach { allSuccess = allSuccess && post(aliasEndpoint, listOf(it)) }
-        peopleEvents.forEach { allSuccess = allSuccess && post(peopleEndpoint, listOf(it)) }
+        trackEvents.forEach { allSuccess = allSuccess && post(trackEndpoint, it) }
+        aliasEvents.forEach { allSuccess = allSuccess && post(aliasEndpoint, it) }
+        peopleEvents.forEach { allSuccess = allSuccess && post(peopleEndpoint, it) }
 
         return allSuccess
     }
@@ -58,13 +55,10 @@ internal class SankofaHttpClient(
     fun post(url: String, payload: Any): Boolean {
         return try {
             val json = gson.toJson(payload)
-            val compressed = gzip(json)
-
-            val body = compressed.toRequestBody("application/json".toMediaType())
+            val body = json.toRequestBody("application/json".toMediaType())
             val request = Request.Builder()
                 .url(url)
                 .addHeader("x-api-key", apiKey)
-                .addHeader("Content-Encoding", "gzip")
                 .addHeader("Content-Type", "application/json")
                 .post(body)
                 .build()
@@ -79,11 +73,5 @@ internal class SankofaHttpClient(
             logger.debug("❌ Network error: ${e.message}")
             false
         }
-    }
-
-    private fun gzip(data: String): ByteArray {
-        val bos = ByteArrayOutputStream()
-        GZIPOutputStream(bos).use { gzip -> gzip.write(data.toByteArray(Charsets.UTF_8)) }
-        return bos.toByteArray()
     }
 }

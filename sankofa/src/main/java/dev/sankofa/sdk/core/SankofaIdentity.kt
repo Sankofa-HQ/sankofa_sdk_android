@@ -2,6 +2,7 @@ package dev.sankofa.sdk.core
 
 import android.content.Context
 import android.content.SharedPreferences
+import dev.sankofa.sdk.Sankofa
 import dev.sankofa.sdk.util.SankofaLogger
 import java.util.UUID
 
@@ -54,7 +55,7 @@ internal class SankofaIdentity(
             "type" to "alias",
             "alias_id" to previousId,
             "distinct_id" to userId,
-            "timestamp" to System.currentTimeMillis(),
+            "timestamp" to Sankofa.currentIsoTimestamp(),
             "message_id" to UUID.randomUUID().toString(),
         )
     }

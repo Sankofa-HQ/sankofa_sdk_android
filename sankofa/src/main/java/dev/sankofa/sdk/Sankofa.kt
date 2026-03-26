@@ -18,6 +18,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.util.UUID
+import java.util.Date
+import java.util.Locale
+import java.text.SimpleDateFormat
+import java.util.TimeZone
 import kotlin.random.Random
 
 /**
@@ -62,6 +66,12 @@ object Sankofa {
 
     private val scope = CoroutineScope(Dispatchers.IO)
     private val gson = Gson()
+
+    internal fun currentIsoTimestamp(): String {
+        return SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }.format(Date())
+    }
 
     /**
      * Initializes the SDK. Call this once inside [android.app.Application.onCreate].
@@ -168,13 +178,17 @@ object Sankofa {
             sessionManager.refresh()
 
             val event = buildMap<String, Any> {
-                put("event", eventName)
+                put("type", "track")
+                put("event_name", eventName)
                 put("distinct_id", identity.distinctId)
-                put("session_id", sessionManager.sessionId)
-                put("timestamp", System.currentTimeMillis())
+                put("properties", buildMap<String, Any> {
+                    sessionManager.sessionId?.let { put("\$session_id", it) }
+                    putAll(properties)
+                })
+                put("default_properties", defaultProperties)
+                put("timestamp", currentIsoTimestamp())
+                put("lib_version", "android-0.1.0")
                 put("message_id", UUID.randomUUID().toString())
-                putAll(defaultProperties)
-                putAll(properties)
             }
 
             queueManager.enqueue(event)
@@ -227,7 +241,7 @@ object Sankofa {
             val event = mapOf(
                 "type" to "people",
                 "distinct_id" to identity.distinctId,
-                "timestamp" to System.currentTimeMillis(),
+                "timestamp" to currentIsoTimestamp(),
                 "\$set" to properties,
             )
             queueManager.enqueue(event)
