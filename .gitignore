@@ -1,0 +1,33 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Local properties (API keys, SDK path – never commit)
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+.DS_Store
+
+# NDK
+.cxx/
+*.so
+
+# Kotlin
+*.class
+
+# Build outputs
+*.aar
+*.apk
+*.ap_
+
+# Test results & reports
+sankofa/build/reports/
+sankofa/build/test-results/
+
+# ProGuard mapping files (generated per release)
+*.map
