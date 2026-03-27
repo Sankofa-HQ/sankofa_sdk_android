@@ -42,6 +42,7 @@ internal class ReplayRecorder(
     private val uploader: ReplayUploader,
 ) {
     private val isCapturing = AtomicBoolean(false)
+    private var lastCaptureTimeMs = 0L
     private val scope = CoroutineScope(Dispatchers.IO)
 
     // HandlerThread for PixelCopy callbacks (must not be the Main thread)
@@ -81,8 +82,21 @@ internal class ReplayRecorder(
     }
 
     private fun onDraw(activity: Activity) {
+        // Guard: throttle to 2 frames per second (500ms)
+        val now = System.currentTimeMillis()
+        if (now - lastCaptureTimeMs < 500) return
+
         // Guard: skip if a capture is already in flight
         if (!isCapturing.compareAndSet(false, true)) return
+        lastCaptureTimeMs = now
+
+        val decor = decorView ?: run {
+            isCapturing.set(false)
+            return
+        }
+        val w = decor.width.takeIf { it > 0 } ?: activity.resources.displayMetrics.widthPixels
+        val h = decor.height.takeIf { it > 0 } ?: activity.resources.displayMetrics.heightPixels
+        bitmapPool.configure(w, h)
 
         val bitmap = bitmapPool.acquire()
         if (bitmap == null) {
@@ -93,7 +107,7 @@ internal class ReplayRecorder(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             captureWithPixelCopy(activity, bitmap)
         } else {
-            captureWithCanvas(bitmap)
+            captureWithCanvas(activity, bitmap)
         }
     }
 
@@ -104,17 +118,20 @@ internal class ReplayRecorder(
             bitmap,
             { copyResult ->
                 if (copyResult == PixelCopy.SUCCESS) {
-                    processCapture(bitmap)
+                    processCapture(activity, bitmap)
                 } else {
                     logger.debug("⚠️ PixelCopy failed ($copyResult) – falling back to canvas")
-                    captureWithCanvas(bitmap)
+                    // Canvas draw MUST execute on Main Thread
+                    activity.runOnUiThread {
+                        captureWithCanvas(activity, bitmap)
+                    }
                 }
             },
             pixelCopyHandler,
         )
     }
 
-    private fun captureWithCanvas(bitmap: Bitmap) {
+    private fun captureWithCanvas(activity: Activity, bitmap: Bitmap) {
         val decor = decorView
         if (decor == null) {
             bitmapPool.release(bitmap)
@@ -124,7 +141,7 @@ internal class ReplayRecorder(
         try {
             val canvas = Canvas(bitmap)
             decor.draw(canvas)
-            processCapture(bitmap)
+            processCapture(activity, bitmap)
         } catch (e: Exception) {
             logger.error("❌ Canvas capture failed", e)
             bitmapPool.release(bitmap)
@@ -132,22 +149,28 @@ internal class ReplayRecorder(
         }
     }
 
-    private fun processCapture(bitmap: Bitmap) {
-        scope.launch {
+    private fun processCapture(activity: Activity, bitmap: Bitmap) {
+        // Step 1: Traverse and apply masks on the Main Thread (UI MUST be touched on Main Thread)
+        activity.runOnUiThread {
             try {
-                // Apply privacy masks (EditText + sankofa_mask tagged views)
                 decorView?.let { root ->
                     MaskTraversal.applyMasks(bitmap, root, maskAllInputs)
                 }
-
-                // Compress and hand off to the uploader
-                val compressed = ReplayCompressor.compress(bitmap)
-                uploader.enqueueFrame(compressed)
             } catch (e: Exception) {
-                logger.error("❌ Frame processing failed", e)
-            } finally {
-                bitmapPool.release(bitmap)
-                isCapturing.set(false)
+                logger.error("❌ Mask compilation failed", e)
+            }
+            
+            // Step 2: Compress and upload purely in the background
+            scope.launch {
+                try {
+                    val compressed = ReplayCompressor.compress(bitmap)
+                    uploader.enqueueFrame(compressed)
+                } catch (e: Exception) {
+                    logger.error("❌ Frame processing failed", e)
+                } finally {
+                    bitmapPool.release(bitmap)
+                    isCapturing.set(false)
+                }
             }
         }
     }

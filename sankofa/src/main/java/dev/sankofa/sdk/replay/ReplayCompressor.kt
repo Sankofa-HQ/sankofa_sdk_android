@@ -26,13 +26,8 @@ internal object ReplayCompressor {
             Bitmap.CompressFormat.WEBP
         }
 
-        val webpBytes = ByteArrayOutputStream().use { bos ->
-            bitmap.compress(format, WEBP_QUALITY, bos)
-            bos.toByteArray()
-        }
-
         return ByteArrayOutputStream().use { bos ->
-            GZIPOutputStream(bos).use { gzip -> gzip.write(webpBytes) }
+            bitmap.compress(format, WEBP_QUALITY, bos)
             bos.toByteArray()
         }
     }

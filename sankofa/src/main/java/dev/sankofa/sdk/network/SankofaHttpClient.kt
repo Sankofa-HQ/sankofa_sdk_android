@@ -9,6 +9,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
+import java.util.zip.GZIPOutputStream
 
 /**
  * A thin OkHttp wrapper that handles batch serialization, GZIP compression,
@@ -73,5 +74,42 @@ internal class SankofaHttpClient(
             logger.debug("❌ Network error: ${e.message}")
             false
         }
+    }
+
+    /**
+     * Dedicated method for uploading replay chunks with required headers and GZIP compression.
+     */
+    fun postReplayChunk(url: String, payload: Any, headers: Map<String, String>): Boolean {
+        return try {
+            val json = gson.toJson(payload)
+            val compressed = gzip(json)
+            val body = compressed.toRequestBody("application/json".toMediaType())
+            
+            val requestBuilder = Request.Builder()
+                .url(url)
+                .addHeader("x-api-key", apiKey)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Content-Encoding", "gzip")
+                .post(body)
+                
+            headers.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
+
+            val request = requestBuilder.build()
+            val response = client.newCall(request).execute()
+            val success = response.isSuccessful
+            response.close()
+
+            if (!success) logger.debug("❌ HTTP ${response.code} for $url")
+            success
+        } catch (e: Exception) {
+            logger.debug("❌ Network error: ${e.message}")
+            false
+        }
+    }
+
+    private fun gzip(data: String): ByteArray {
+        val bos = ByteArrayOutputStream()
+        GZIPOutputStream(bos).use { gzip -> gzip.write(data.toByteArray(Charsets.UTF_8)) }
+        return bos.toByteArray()
     }
 }

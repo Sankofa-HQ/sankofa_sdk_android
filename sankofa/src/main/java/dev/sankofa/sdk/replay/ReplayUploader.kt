@@ -92,7 +92,13 @@ internal class ReplayUploader(
         )
 
         val url = "$replayEndpoint/api/ee/replay/chunk"
-        val success = httpClient.post(url, payload)
+        val headers = mapOf(
+            "X-Session-Id" to sessionId,
+            "X-Distinct-Id" to distinctId,
+            "X-Chunk-Index" to chunkIndex.toString(),
+            "X-Replay-Mode" to "screenshot"
+        )
+        val success = httpClient.postReplayChunk(url, payload, headers)
 
         if (success) {
             chunkIndex++

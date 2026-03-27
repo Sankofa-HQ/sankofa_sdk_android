@@ -40,6 +40,8 @@ internal class SankofaSessionManager(
             startNewSession()
         } else {
             _sessionId = storedSessionId
+            logger.debug("🔁 Resumed session: $_sessionId")
+            onNewSession(_sessionId!!)
         }
 
         prefs.edit().putLong(KEY_LAST_EVENT, now).apply()
