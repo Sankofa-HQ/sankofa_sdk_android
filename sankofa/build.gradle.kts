@@ -2,6 +2,8 @@ plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.ksp)
+    id("maven-publish")
+    id("signing")
 }
 
 android {
@@ -41,6 +43,13 @@ android {
             isIncludeAndroidResources = true
         }
     }
+
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+            withJavadocJar()
+        }
+    }
 }
 
 dependencies {
@@ -71,4 +80,56 @@ dependencies {
     testImplementation(libs.coroutines.test)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            register<MavenPublication>("release") {
+                groupId = "dev.sankofa.sdk"
+                artifactId = "sankofa-android"
+                version = "1.0.0"
+
+                // FIX 1: Removed the nested afterEvaluate
+                from(components["release"])
+
+                pom {
+                    name.set("Sankofa Android SDK")
+                    description.set("The official Android SDK for Sankofa. Provides privacy-first session replay, offline-ready event tracking, and advanced mobile observability.")
+                    url.set("https://sankofa.dev")
+
+                    licenses {
+                        license {
+                            name.set("The MIT License")
+                            url.set("https://opensource.org/licenses/MIT")
+                        }
+                    }
+                    developers {
+                        developer {
+                            id.set("saytoonz")
+                            name.set("Sankofa")
+                            email.set("dev@sankofa.dev")
+                        }
+                    }
+                    scm {
+                        connection.set("scm:git:github.com/Sankofa-HQ/sankofa_sdk_android.git")
+                        developerConnection.set("scm:git:ssh://github.com/Sankofa-HQ/sankofa_sdk_android.git")
+                        url.set("https://github.com/Sankofa-HQ/sankofa_sdk_android")
+                    }
+                }
+            }
+        }
+        
+        // FIX 2: Switched back to the bulletproof Local Bundle method
+        repositories {
+            maven {
+                name = "LocalBundle"
+                url = uri(layout.buildDirectory.dir("repo"))
+            }
+        }
+    }
+
+    signing {
+        sign(publishing.publications["release"])
+    }
 }

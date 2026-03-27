@@ -3,8 +3,11 @@
 build/
 !gradle/wrapper/gradle-wrapper.jar
 
-# Local properties (API keys, SDK path – never commit)
+# Local properties (API keys, SDK path, signing secrets – never commit)
 local.properties
+*.gpg
+secring.gpg
+sankofa-signing.jks
 
 # Android Studio / IntelliJ
 .idea/
