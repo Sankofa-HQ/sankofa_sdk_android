@@ -1,6 +1,48 @@
-# Sankofa Android SDK
+# Sankofa Android SDK 🚀
 
-Native Android analytics and session replay SDK for the Sankofa platform.
+[![Maven Central](https://img.shields.io/maven-central/v/dev.sankofa.sdk/sankofa-android)](https://central.sonatype.com/artifact/dev.sankofa.sdk/sankofa-android)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+The official Android SDK for [Sankofa Analytics](https://sankofa.dev). Capture every event, resolve user identities, and experience high-fidelity session replays with a single, lightweight package.
+
+## ✨ Features
+
+*   **Event Tracking**: Send custom events with arbitrary properties and automatic device metadata.
+*   **Identity Management**: Seamlessly link anonymous users to permanent customer profiles.
+*   **Session Replay**:
+    *   **Screenshot Mode**: Pixel-perfect visual capture for complex UI debugging.
+    *   **Auto-masking**: Sensitive data protection via `SankofaMask` and automatic `EditText` detection.
+*   **Offline Reliability**: Robust local queueing with background auto-flushing via WorkManager.
+*   **Privacy First**: Choose what to track and what to mask with granular controls.
+*   **Lightweight**: Minimal footprint, optimized for performance and battery life.
+
+##  Installation
+
+Add the dependency to your module's `build.gradle.kts` (or `build.gradle`):
+
+### Gradle (Kotlin)
+```kotlin
+dependencies {
+    implementation("dev.sankofa.sdk:sankofa-android:1.0.0")
+}
+```
+
+### Gradle (Groovy)
+```groovy
+dependencies {
+    implementation 'dev.sankofa.sdk:sankofa-android:1.0.0'
+}
+```
+
+### Maven
+```xml
+<dependency>
+  <groupId>dev.sankofa.sdk</groupId>
+  <artifactId>sankofa-android</artifactId>
+  <version>1.0.0</version>
+  <type>aar</type>
+</dependency>
+```
 
 ## Quick Start
 
@@ -45,8 +87,13 @@ That's it. The SDK **auto-registers** into every Activity via `ActivityLifecycle
 
 **Automatic masking** – all `EditText` views are automatically blacked out in recordings when `maskAllInputs = true` (the default).
 
-**Manual masking** – tag any `View` to mask it:
+**Manual masking** – use the Kotlin extension or set the View tag manually:
+
 ```kotlin
+// Option 1: Kotlin Extension (Recommended)
+myView.sankofaMask = true
+
+// Option 2: View Tag (Works with Java)
 myView.tag = "sankofa_mask"
 ```
 
