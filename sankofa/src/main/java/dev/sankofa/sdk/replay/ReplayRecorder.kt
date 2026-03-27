@@ -13,6 +13,7 @@ import android.view.ViewTreeObserver
 import dev.sankofa.sdk.util.SankofaLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -51,6 +52,7 @@ internal class ReplayRecorder(
 
     private var decorView: View? = null
     private var drawListener: ViewTreeObserver.OnDrawListener? = null
+    private var originalWindowCallback: android.view.Window.Callback? = null
 
     fun startRecording(activity: Activity) {
         stopRecording() // detach from any previous activity first
@@ -66,6 +68,19 @@ internal class ReplayRecorder(
         decor.viewTreeObserver.addOnDrawListener(listener)
         drawListener = listener
 
+        // Intercept Touch Events for Session Replay 'Fake Cursor'
+        val existingCallback = activity.window.callback
+        originalWindowCallback = existingCallback
+        activity.window.callback = object : android.view.Window.Callback by existingCallback {
+            override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+                if (event.action == android.view.MotionEvent.ACTION_DOWN || event.action == android.view.MotionEvent.ACTION_UP) {
+                    val actionType = if (event.action == android.view.MotionEvent.ACTION_DOWN) 1 else 0
+                    uploader.enqueueTouchEvent(event.x.toInt(), event.y.toInt(), System.currentTimeMillis(), actionType)
+                }
+                return existingCallback.dispatchTouchEvent(event)
+            }
+        }
+
         logger.debug("🎬 ReplayRecorder started for ${activity.localClassName}")
     }
 
@@ -76,9 +91,22 @@ internal class ReplayRecorder(
                 decor.viewTreeObserver.removeOnDrawListener(it)
             }
         }
+        decorView?.context?.let { ctx ->
+            if (ctx is Activity && originalWindowCallback != null) {
+                ctx.window.callback = originalWindowCallback
+            }
+        }
+        originalWindowCallback = null
+
         drawListener = null
         decorView = null
         logger.debug("🛑 ReplayRecorder stopped")
+    }
+
+    fun destroy() {
+        stopRecording()
+        scope.cancel()
+        pixelCopyThread.quitSafely()
     }
 
     private fun onDraw(activity: Activity) {
@@ -113,18 +141,17 @@ internal class ReplayRecorder(
 
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
     private fun captureWithPixelCopy(activity: Activity, bitmap: Bitmap) {
+        val captureTimestamp = System.currentTimeMillis()
         PixelCopy.request(
             activity.window,
             bitmap,
             { copyResult ->
                 if (copyResult == PixelCopy.SUCCESS) {
-                    processCapture(activity, bitmap)
+                    processCapture(activity, bitmap, captureTimestamp)
                 } else {
-                    logger.debug("⚠️ PixelCopy failed ($copyResult) – falling back to canvas")
-                    // Canvas draw MUST execute on Main Thread
-                    activity.runOnUiThread {
-                        captureWithCanvas(activity, bitmap)
-                    }
+                    logger.debug("⚠️ PixelCopy failed ($copyResult) – dropping frame to prevent ANR")
+                    bitmapPool.release(bitmap)
+                    isCapturing.set(false)
                 }
             },
             pixelCopyHandler,
@@ -149,7 +176,7 @@ internal class ReplayRecorder(
         }
     }
 
-    private fun processCapture(activity: Activity, bitmap: Bitmap) {
+    private fun processCapture(activity: Activity, bitmap: Bitmap, captureTimestamp: Long = System.currentTimeMillis()) {
         // Step 1: Traverse and apply masks on the Main Thread (UI MUST be touched on Main Thread)
         activity.runOnUiThread {
             try {
@@ -164,7 +191,7 @@ internal class ReplayRecorder(
             scope.launch {
                 try {
                     val compressed = ReplayCompressor.compress(bitmap)
-                    uploader.enqueueFrame(compressed)
+                    uploader.enqueueFrame(compressed, captureTimestamp)
                 } catch (e: Exception) {
                     logger.error("❌ Frame processing failed", e)
                 } finally {

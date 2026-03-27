@@ -285,6 +285,7 @@ object Sankofa {
     fun shutdown() {
         if (!isInitialized) return
         lifecycleObserver.unregister()
+        replayRecorder.destroy()
         isInitialized = false
         logger.debug("🔌 Sankofa shut down")
     }

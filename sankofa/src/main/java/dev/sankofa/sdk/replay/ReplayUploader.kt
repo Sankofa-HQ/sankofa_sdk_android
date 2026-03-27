@@ -8,7 +8,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
-import java.util.Base64
+import android.util.Base64
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Receives compressed frame [ByteArray]s from [ReplayRecorder], batches them,
@@ -27,8 +28,9 @@ internal class ReplayUploader(
     private val chunkFrameCount: Int = FRAMES_PER_CHUNK,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
 ) {
-    private val frameChannel = Channel<ByteArray>(capacity = Channel.UNLIMITED)
-    private val frameBuffer = mutableListOf<ByteArray>()
+    private val frameChannel = Channel<Pair<ByteArray, Long>>(capacity = Channel.UNLIMITED)
+    private val frameBuffer = mutableListOf<Pair<ByteArray, Long>>()
+    private val touchEventsBuffer = CopyOnWriteArrayList<Map<String, Any>>()
 
     private var sessionId: String = ""
     private var distinctId: String = "anonymous"
@@ -63,9 +65,28 @@ internal class ReplayUploader(
     }
 
     /** Called from [ReplayRecorder] after each frame is compressed. */
-    fun enqueueFrame(compressedFrame: ByteArray) {
+    fun enqueueFrame(compressedFrame: ByteArray, captureTimestamp: Long) {
         if (sessionId.isEmpty()) return
-        frameChannel.trySend(compressedFrame)
+        frameChannel.trySend(Pair(compressedFrame, captureTimestamp))
+    }
+
+    /** Called from [ReplayRecorder] when a user touches the screen. */
+    fun enqueueTouchEvent(x: Int, y: Int, timestamp: Long, type: Int) {
+        if (sessionId.isEmpty()) return
+        // Formatted to loosely mirror the rrweb type: 3 MouseInteraction payload
+        touchEventsBuffer.add(
+            mapOf(
+                "type" to 3,
+                "data" to mapOf(
+                    "source" to 2, // MouseInteraction
+                    "type" to type, // 1 = MouseDown, 0 = MouseUp
+                    "id" to 1,
+                    "x" to x,
+                    "y" to y
+                ),
+                "timestamp" to timestamp
+            )
+        )
     }
 
     /** Force-flush remaining frames – called when the app goes to background. */
@@ -76,20 +97,26 @@ internal class ReplayUploader(
     private suspend fun uploadBatch() {
         if (frameBuffer.isEmpty() || sessionId.isEmpty()) return
 
-        val frames = frameBuffer.map { Base64.getEncoder().encodeToString(it) }
-        frameBuffer.clear()
+        val framesAttemptingUpload = frameBuffer.toList()
+        val eventsAttemptingUpload = touchEventsBuffer.toList()
 
-        val payload = mapOf(
+        val frames = framesAttemptingUpload.map { 
+            mapOf(
+                "timestamp" to it.second,
+                "image_base64" to Base64.encodeToString(it.first, Base64.NO_WRAP)
+            )
+        }
+
+        val payload = mutableMapOf<String, Any>(
             "session_id" to sessionId,
             "chunk_index" to chunkIndex,
             "mode" to "screenshot",
-            "frames" to frames.mapIndexed { i, f ->
-                mapOf(
-                    "timestamp" to System.currentTimeMillis() + i,
-                    "image_base64" to f,
-                )
-            },
+            "frames" to frames
         )
+
+        if (eventsAttemptingUpload.isNotEmpty()) {
+            payload["events"] = eventsAttemptingUpload
+        }
 
         val url = "$replayEndpoint/api/ee/replay/chunk"
         val headers = mapOf(
@@ -103,11 +130,14 @@ internal class ReplayUploader(
         if (success) {
             chunkIndex++
             prefs.edit().putInt(chunkKey(sessionId), chunkIndex).apply()
+            
+            // Only clear if the upload succeeded
+            frameBuffer.removeAll(framesAttemptingUpload)
+            touchEventsBuffer.removeAll(eventsAttemptingUpload)
+            
             logger.debug("🚀 Replay chunk ${chunkIndex - 1} uploaded (${frames.size} frames)")
         } else {
-            // Re-add frames to buffer for retry on next flush
-            // (frames already cleared, this is best-effort – severe network failures may lose frames)
-            logger.debug("⚠️ Replay chunk upload failed – chunk ${chunkIndex} will retry")
+            logger.debug("⚠️ Replay chunk upload failed – keeping in buffer for retry")
         }
     }
 
