@@ -191,7 +191,7 @@ internal class ReplayRecorder(
             scope.launch {
                 try {
                     val compressed = ReplayCompressor.compress(bitmap)
-                    uploader.enqueueFrame(compressed, captureTimestamp)
+                    uploader.enqueueFrame(compressed, captureTimestamp, bitmap.width, bitmap.height)
                 } catch (e: Exception) {
                     logger.error("❌ Frame processing failed", e)
                 } finally {

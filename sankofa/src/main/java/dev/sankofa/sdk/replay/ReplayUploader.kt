@@ -12,6 +12,16 @@ import android.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
+ * A captured frame with its metadata.
+ */
+internal data class FrameData(
+    val bytes: ByteArray,
+    val timestampMs: Long,
+    val width: Int,
+    val height: Int
+)
+
+/**
  * Receives compressed frame [ByteArray]s from [ReplayRecorder], batches them,
  * and uploads chunks to [/api/ee/replay/chunk].
  *
@@ -28,8 +38,8 @@ internal class ReplayUploader(
     private val chunkFrameCount: Int = FRAMES_PER_CHUNK,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
 ) {
-    private val frameChannel = Channel<Pair<ByteArray, Long>>(capacity = Channel.UNLIMITED)
-    private val frameBuffer = mutableListOf<Pair<ByteArray, Long>>()
+    private val frameChannel = Channel<FrameData>(capacity = Channel.UNLIMITED)
+    private val frameBuffer = mutableListOf<FrameData>()
     private val touchEventsBuffer = CopyOnWriteArrayList<Map<String, Any>>()
 
     private var sessionId: String = ""
@@ -65,9 +75,9 @@ internal class ReplayUploader(
     }
 
     /** Called from [ReplayRecorder] after each frame is compressed. */
-    fun enqueueFrame(compressedFrame: ByteArray, captureTimestamp: Long) {
+    fun enqueueFrame(compressedFrame: ByteArray, captureTimestamp: Long, width: Int, height: Int) {
         if (sessionId.isEmpty()) return
-        frameChannel.trySend(Pair(compressedFrame, captureTimestamp))
+        frameChannel.trySend(FrameData(compressedFrame, captureTimestamp, width, height))
     }
 
     /** Called from [ReplayRecorder] when a user touches the screen. */
@@ -102,15 +112,22 @@ internal class ReplayUploader(
 
         val frames = framesAttemptingUpload.map { 
             mapOf(
-                "timestamp" to it.second,
-                "image_base64" to Base64.encodeToString(it.first, Base64.NO_WRAP)
+                "timestamp" to it.timestampMs,
+                "image_base64" to Base64.encodeToString(it.bytes, Base64.NO_WRAP)
             )
         }
+
+        val lastFrame = framesAttemptingUpload.last()
 
         val payload = mutableMapOf<String, Any>(
             "session_id" to sessionId,
             "chunk_index" to chunkIndex,
             "mode" to "screenshot",
+            "device_context" to mapOf(
+                "screen_width" to lastFrame.width,
+                "screen_height" to lastFrame.height,
+                "pixel_ratio" to 1.0
+            ),
             "frames" to frames
         )
 
