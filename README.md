@@ -2,39 +2,44 @@
 
 [![Maven Central](https://img.shields.io/maven-central/v/dev.sankofa.sdk/sankofa-android)](https://central.sonatype.com/artifact/dev.sankofa.sdk/sankofa-android)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Sankofa](https://img.shields.io/badge/Made%20with-Sankofa-blueviolet)](https://sankofa.dev)
 
 The official Android SDK for [Sankofa Analytics](https://sankofa.dev). Capture every event, resolve user identities, and experience high-fidelity session replays with a single, lightweight package.
 
+---
+
 ## ✨ Features
 
-*   **Event Tracking**: Send custom events with arbitrary properties and automatic device metadata.
-*   **Identity Management**: Seamlessly link anonymous users to permanent customer profiles.
-*   **Session Replay**:
-    *   **Screenshot Mode**: Pixel-perfect visual capture for complex UI debugging.
-    *   **Auto-masking**: Sensitive data protection via `SankofaMask` and automatic `EditText` detection.
-*   **Offline Reliability**: Robust local queueing with background auto-flushing via WorkManager.
-*   **Privacy First**: Choose what to track and what to mask with granular controls.
-*   **Lightweight**: Minimal footprint, optimized for performance and battery life.
+- **Event Tracking**: Send custom events with arbitrary properties and automatic device metadata.
+- **Identity Management**: Seamlessly link anonymous users to permanent customer profiles.
+- **Session Replay**: 
+  - **Screenshot Mode**: Pixel-perfect visual capture for complex UI debugging.
+  - **Auto-masking**: Sensitive data protection via `sankofaMask` extension and automatic `EditText` detection.
+- **Offline Reliability**: Robust local queueing with background auto-flushing via WorkManager.
+- **Privacy First**: Choose what to track and what to mask with granular controls.
 
-##  Installation
+---
 
+## 🚀 Quick Start
+
+### 1. Install
 Add the dependency to your module's `build.gradle.kts` (or `build.gradle`):
 
-### Gradle (Kotlin)
+#### Gradle (Kotlin)
 ```kotlin
 dependencies {
     implementation("dev.sankofa.sdk:sankofa-android:1.0.0")
 }
 ```
 
-### Gradle (Groovy)
+#### Gradle (Groovy)
 ```groovy
 dependencies {
     implementation 'dev.sankofa.sdk:sankofa-android:1.0.0'
 }
 ```
 
-### Maven
+#### Maven
 ```xml
 <dependency>
   <groupId>dev.sankofa.sdk</groupId>
@@ -44,9 +49,8 @@ dependencies {
 </dependency>
 ```
 
-## Quick Start
-
-Add to your `Application` class:
+### 2. Initialize
+Initialize the SDK in your `Application` class. It **auto-registers** to all Activities – no per-screen boilerplate required.
 
 ```kotlin
 class MyApplication : Application() {
@@ -54,97 +58,85 @@ class MyApplication : Application() {
         super.onCreate()
         Sankofa.init(
             context = this,
-            apiKey = "sk_live_12345",
+            apiKey = "YOUR_PROJECT_API_KEY",
             config = SankofaConfig(
                 recordSessions = true,
-                maskAllInputs = true,
+                maskAllInputs = true, // Auto-mask all EditTexts
             )
         )
     }
 }
 ```
 
-That's it. The SDK **auto-registers** into every Activity via `ActivityLifecycleCallbacks` – no per-screen boilerplate required.
-
 ---
 
-## API Reference
+## 🛠 Usage Guide
 
-| Method | Description |
-|---|---|
-| `Sankofa.init(context, apiKey, config)` | Initialize the SDK (call once in `Application.onCreate`) |
-| `Sankofa.track(eventName, properties)` | Track a custom event |
-| `Sankofa.identify(userId)` | Link anonymous session to a known user |
-| `Sankofa.reset()` | Clear user identity, start fresh anonymous session |
-| `Sankofa.peopleSet(properties)` | Set profile attributes for the current user |
-| `Sankofa.setPerson(name, email, avatar)` | Convenience wrapper for common user traits |
-| `Sankofa.flush()` | Force-upload all queued events immediately |
-| `Sankofa.shutdown()` | Tear down the SDK (testing/unusual cases only) |
+### Event Tracking
+Track any user action with a simple method call.
 
----
+```kotlin
+Sankofa.track("completed_purchase", mapOf(
+    "item_name" to "Vintage Camera",
+    "price" to 120.50,
+    "currency" to "USD"
+))
+```
 
-## Session Replay Privacy
+### Identity & Profiles
+Identify your users to merge their anonymous history into a single profile.
 
-**Automatic masking** – all `EditText` views are automatically blacked out in recordings when `maskAllInputs = true` (the default).
+```kotlin
+// Link anonymous data to a specific user ID
+Sankofa.identify("user_99")
 
-**Manual masking** – use the Kotlin extension or set the View tag manually:
+// Set user attributes
+Sankofa.setPerson(
+    name = "Jane Doe",
+    email = "jane@example.com",
+    properties = mapOf("membership" to "Gold")
+)
+```
+
+### Session Replay Privacy
+Sankofa prioritizes user privacy. You can mask sensitive UI elements manually using either a Kotlin extension or a View tag.
 
 ```kotlin
 // Option 1: Kotlin Extension (Recommended)
 myView.sankofaMask = true
 
-// Option 2: View Tag (Works with Java)
+// Option 2: View Tag (Works for XML and Java)
 myView.tag = "sankofa_mask"
 ```
 
 ---
 
-## Architecture
+## 🏗 Modular Architecture (For Contributors)
 
-```
-Sankofa.track() → EventQueueManager → Room DB (events_queue)
-                                    ↓
-                    SyncWorker (WorkManager) → SankofaHttpClient → Go backend
-                    (triggers: 50 events | 30s timer | app background)
-```
+The Sankofa Android SDK is built with a modular, highly-testable architecture:
 
-```
-Activity resumed → ReplayRecorder
-                   ↓  ViewTreeObserver.OnDrawListener (only fires on change)
-                   ↓  PixelCopy (API 26+) / view.draw(canvas) fallback
-                   ↓  MaskTraversal (EditText + sankofa_mask)
-                   ↓  ReplayCompressor (WebP LOSSY 60 + GZIP)
-                   ↓  ReplayUploader → /api/ee/replay/chunk
-```
+- **`Sankofa`**: The primary singleton entry point for initialization and public API dispatching.
+- **`EventQueueManager`**: Manages the persistent Room database and background flushing logic.
+- **`SyncWorker`**: Utilizes Android **WorkManager** for reliable background sync, even if the app is closed.
+- **`ReplayRecorder`**: Captures screen changes using **PixelCopy (API 26+)** with a software canvas fallback.
+- **`BitmapPool`**: High-performance memory management using reusable Bitmaps to prevent GC pressure.
+- **`MaskTraversal`**: Post-processing engine that applies privacy masks to the captured frames.
+- **`ReplayUploader`**: Handles WebP-compressed and Gzipped chunk uploads via a non-blocking Kotlin Channel.
 
----
+### Local Development
 
-## Configuration Options
-
-| Option | Default | Description |
-|---|---|---|
-| `endpoint` | `https://api.sankofa.dev` | Base URL of your Sankofa server |
-| `recordSessions` | `true` | Enable session replay |
-| `maskAllInputs` | `true` | Auto-mask all `EditText` views |
-| `debug` | `false` | Verbose Logcat output |
-| `trackLifecycleEvents` | `true` | Auto-track `$app_opened/foregrounded/backgrounded` |
-| `flushIntervalSeconds` | `30` | How often to flush events while app is foregrounded |
-| `batchSize` | `50` | Flush immediately when this many events accumulate |
+1. Clone the repo: `git clone https://github.com/Sankofa-HQ/sankofa_sdk_android`
+2. Run build: `./gradlew assembleRelease`
+3. Run tests: `./gradlew test` (No emulator required)
 
 ---
 
-## Requirements
+## 📑 Documentation
 
-- **minSdk**: 21 (Android 5.0 Lollipop)
-- **compileSdk**: 34
-- **Permissions**: `INTERNET`, `ACCESS_NETWORK_STATE` (auto-merged from SDK manifest)
+For full API references and integration guides, visit our [Documentation Portal](https://docs.sankofa.dev).
 
 ---
 
-## Building
+## 🛡 License
 
-```bash
-cd sdks/sankofa_sdk_android
-./gradlew :sankofa:assembleRelease   # produces sankofa/build/outputs/aar/sankofa-release.aar
-./gradlew :sankofa:test              # run unit tests (no emulator required)
-```
+Distributed under the MIT License. See `LICENSE` for more information.
