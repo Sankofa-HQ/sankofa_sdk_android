@@ -75,13 +75,43 @@ internal class ReplayRecorder(
             override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
                 if (event.action == android.view.MotionEvent.ACTION_DOWN || event.action == android.view.MotionEvent.ACTION_UP) {
                     val actionType = if (event.action == android.view.MotionEvent.ACTION_DOWN) 1 else 0
-                    uploader.enqueueTouchEvent(event.x.toInt(), event.y.toInt(), System.currentTimeMillis(), actionType)
+                    
+                    // 🚀 Infinite Scroll Support: Find active scroll offset
+                    var scrollOffsetY = 0
+                    findActiveScrollView(decor)?.let {
+                        scrollOffsetY = it.scrollY
+                    }
+
+                    val absY = event.y.toInt() + scrollOffsetY
+                    val screen = dev.sankofa.sdk.Sankofa.getSnapshot()["$screen_name"] as? String ?: "Unknown"
+
+                    uploader.enqueueTouchEvent(
+                        x = event.x.toInt(), 
+                        y = event.y.toInt(), 
+                        absoluteY = absY,
+                        scrollOffsetY = scrollOffsetY,
+                        screen = screen,
+                        timestamp = System.currentTimeMillis(), 
+                        type = actionType
+                    )
                 }
                 return existingCallback.dispatchTouchEvent(event)
             }
         }
 
         logger.debug("🎬 ReplayRecorder started for ${activity.localClassName}")
+    }
+
+    private fun findActiveScrollView(view: View): View? {
+        if (view is android.widget.ScrollView || view is android.widget.AbsListView || view is androidx.recyclerview.widget.RecyclerView) {
+            if (view.isShown) return view
+        }
+        if (view is android.view.ViewGroup) {
+            for (i in 0 until view.childCount) {
+                findActiveScrollView(view.getChildAt(i))?.let { return it }
+            }
+        }
+        return null
     }
 
     fun stopRecording() {

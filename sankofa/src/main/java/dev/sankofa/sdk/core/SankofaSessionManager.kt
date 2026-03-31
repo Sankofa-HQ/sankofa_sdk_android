@@ -7,11 +7,8 @@ import java.util.UUID
 
 /**
  * Manages session lifetime.
- * A session expires after [SESSION_TIMEOUT_MS] of inactivity.
- * When a new session starts, [onNewSession] is called so the caller
- * can fetch remote replay config and start recording.
- *
- * Mirrors [sankofa_sdk_flutter/lib/src/sankofa_session_manager.dart].
+ * Following the enterprise standard, a session is rotated if the app is resumed
+ * after being in the background for more than [SESSION_TIMEOUT_MS].
  */
 internal class SankofaSessionManager(
     context: Context,
@@ -22,47 +19,71 @@ internal class SankofaSessionManager(
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     private var _sessionId: String? = null
-    val sessionId: String get() = _sessionId ?: error("Session not started – call refresh() first")
+    val sessionId: String get() = _sessionId ?: generateAndStoreSessionId()
 
     /**
-     * Checks whether the current session has expired.
-     * If so (or if there is no session), starts a new one and fires [onNewSession].
+     * Checks whether the current session has expired based on background duration.
+     * If so, starts a new one and fires [onNewSession].
+     * Returns true if a new session was rotated.
+     */
+    suspend fun checkSessionRotationOnResume(): Boolean {
+        val now = System.currentTimeMillis()
+        val lastBackground = prefs.getLong(KEY_LAST_BACKGROUND, 0L)
+        
+        if (lastBackground == 0L) return false
+
+        val elapsed = now - lastBackground
+        if (elapsed > SESSION_TIMEOUT_MS) {
+            logger.debug("⌛ Session timed out after ${elapsed / 60000} minutes. Rotating.")
+            startNewSession()
+            prefs.edit().remove(KEY_LAST_BACKGROUND).apply()
+            return true
+        }
+        
+        return false
+    }
+
+    /**
+     * Called when the app moves to the background.
+     */
+    fun setLastBackgroundTime() {
+        prefs.edit().putLong(KEY_LAST_BACKGROUND, System.currentTimeMillis()).apply()
+    }
+
+    /**
+     * Standard refresh to ensure sessionId is ready.
      */
     suspend fun refresh() {
-        val now = System.currentTimeMillis()
-        val lastEventTime = prefs.getLong(KEY_LAST_EVENT, 0L)
-        val storedSessionId = prefs.getString(KEY_SESSION_ID, null)
-
-        val expired = storedSessionId == null ||
-                (now - lastEventTime) > SESSION_TIMEOUT_MS
-
-        if (expired) {
-            startNewSession()
-        } else {
-            _sessionId = storedSessionId
-            logger.debug("🔁 Resumed session: $_sessionId")
-            onNewSession(_sessionId!!)
+        if (_sessionId == null) {
+            val stored = prefs.getString(KEY_SESSION_ID, null)
+            if (stored == null) {
+                startNewSession()
+            } else {
+                _sessionId = stored
+                onNewSession(_sessionId!!)
+            }
         }
-
-        prefs.edit().putLong(KEY_LAST_EVENT, now).apply()
     }
 
     /** Force-starts a new session regardless of timeout state. */
     suspend fun startNewSession() {
-        val newId = UUID.randomUUID().toString()
-        _sessionId = newId
+        _sessionId = generateAndStoreSessionId()
+        onNewSession(_sessionId!!)
+    }
+
+    private fun generateAndStoreSessionId(): String {
+        val newId = "s_${UUID.randomUUID()}"
         prefs.edit()
             .putString(KEY_SESSION_ID, newId)
-            .putLong(KEY_LAST_EVENT, System.currentTimeMillis())
             .apply()
-        logger.debug("🆕 New session: $newId")
-        onNewSession(newId)
+        logger.debug("🆕 Session ID: $newId")
+        return newId
     }
 
     companion object {
         private const val PREFS_NAME = "sankofa_session"
         private const val KEY_SESSION_ID = "sankofa_session_id"
-        private const val KEY_LAST_EVENT = "sankofa_last_event_time"
+        private const val KEY_LAST_BACKGROUND = "sankofa_last_background_time"
 
         /** 30 minutes of inactivity triggers a new session. */
         private const val SESSION_TIMEOUT_MS = 30 * 60 * 1000L

@@ -81,7 +81,15 @@ internal class ReplayUploader(
     }
 
     /** Called from [ReplayRecorder] when a user touches the screen. */
-    fun enqueueTouchEvent(x: Int, y: Int, timestamp: Long, type: Int) {
+    fun enqueueTouchEvent(
+        x: Int, 
+        y: Int, 
+        absoluteY: Int, 
+        scrollOffsetY: Int, 
+        screen: String, 
+        timestamp: Long, 
+        type: Int
+    ) {
         if (sessionId.isEmpty()) return
         // Formatted to loosely mirror the rrweb type: 3 MouseInteraction payload
         touchEventsBuffer.add(
@@ -89,10 +97,13 @@ internal class ReplayUploader(
                 "type" to 3,
                 "data" to mapOf(
                     "source" to 2, // MouseInteraction
-                    "type" to type, // 1 = MouseDown, 0 = MouseUp
+                    "type" to type, // 1 = MouseDown, 0 = MouseUp, etc.
                     "id" to 1,
                     "x" to x,
-                    "y" to y
+                    "y" to y,
+                    "abs_y" to absoluteY,
+                    "scroll_y" to scrollOffsetY,
+                    "screen" to screen
                 ),
                 "timestamp" to timestamp
             )

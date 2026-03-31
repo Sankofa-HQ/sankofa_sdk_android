@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 internal class SankofaLifecycleObserver(
     private val application: Application,
     private val logger: SankofaLogger,
+    private val sessionManager: SankofaSessionManager,
     private val queueManager: EventQueueManager,
     private val replayRecorder: ReplayRecorder,
     private val trackLifecycleEvents: Boolean,
@@ -58,7 +59,13 @@ internal class SankofaLifecycleObserver(
 
     override fun onStart(owner: LifecycleOwner) {
         // App came to foreground
-        if (trackLifecycleEvents) onTrack("\$app_foregrounded")
+        scope.launch {
+            // 🚀 Check for session rotation (30m rule)
+            if (sessionManager.checkSessionRotationOnResume()) {
+                onTrack("\$session_start")
+            }
+            if (trackLifecycleEvents) onTrack("\$app_foregrounded")
+        }
 
         // Start the 30-second periodic flush loop
         flushJob?.cancel()
@@ -74,6 +81,10 @@ internal class SankofaLifecycleObserver(
 
     override fun onStop(owner: LifecycleOwner) {
         // App moved to background
+        
+        // 🚀 Capture background time for rotation
+        sessionManager.setLastBackgroundTime()
+        
         flushJob?.cancel()
         if (trackLifecycleEvents) onTrack("\$app_backgrounded")
         replayRecorder.stopRecording()
@@ -87,6 +98,9 @@ internal class SankofaLifecycleObserver(
 
     private val activityCallbacks = object : Application.ActivityLifecycleCallbacks {
         override fun onActivityResumed(activity: Activity) {
+            // 🚀 Automatic Screen Tagging Fallback
+            Sankofa.onActivityResumed(activity)
+
             if (recordSessions) {
                 replayRecorder.startRecording(activity)
                 logger.debug("🎥 Replay attached to ${activity.localClassName}")

@@ -64,8 +64,23 @@ object Sankofa {
     private var replayConfig: ReplayConfig? = null
     private var isInitialized = false
 
+    /** The current screen name for stateful tagging (Heatmaps). */
+    private var currentScreen: String = "Unknown"
+    private var isManualScreen: Boolean = false
+
     private val scope = CoroutineScope(Dispatchers.IO)
     private val gson = Gson()
+
+    internal fun onActivityResumed(activity: android.app.Activity) {
+        // 🚀 Hierarchy: Manual Tag > Auto Fallback
+        // Reset manual screen on every Activity change unless it's the same Activity
+        if (isManualScreen) {
+            isManualScreen = false
+        }
+        
+        currentScreen = activity.javaClass.simpleName
+        logger.debug("📍 Auto-tagged screen: $currentScreen")
+    }
 
     internal fun currentIsoTimestamp(): String {
         return SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
@@ -135,6 +150,7 @@ object Sankofa {
         lifecycleObserver = SankofaLifecycleObserver(
             application = appContext as android.app.Application,
             logger = logger,
+            sessionManager = sessionManager,
             queueManager = queueManager,
             replayRecorder = replayRecorder,
             trackLifecycleEvents = config.trackLifecycleEvents,
@@ -149,9 +165,21 @@ object Sankofa {
         // Boot up
         scope.launch {
             sessionManager.refresh()
-            if (config.trackLifecycleEvents) {
-                track("\$app_opened")
+
+            // First Time Open Logic
+            val prefs = appContext.getSharedPreferences("sankofa_internal", Context.MODE_PRIVATE)
+            val isFirstOpen = !prefs.getBoolean("first_open_detected", false)
+            if (isFirstOpen) {
+                prefs.edit().putBoolean("first_open_detected", true).apply()
+                track("$app_open_first_time")
             }
+
+            if (config.trackLifecycleEvents) {
+                track("$app_opened")
+            }
+            
+            track("$session_start")
+            
             isInitialized = true
             logger.debug("⚡ Sankofa initialized (debug=${config.debug})")
         }
@@ -162,6 +190,18 @@ object Sankofa {
     // --- Public API ---
 
     /**
+     * Explicitly tag the screen the user is currently viewing.
+     * Used for heatmaps and behavioral context.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun screen(name: String, properties: Map<String, Any> = emptyMap()) {
+        this.currentScreen = name
+        this.isManualScreen = true
+        track("$screen_view", properties + mapOf("$screen_name" to name))
+    }
+
+    /**
      * Tracks a custom event with optional [properties].
      * This is a fire-and-forget call – it returns immediately and writes to the
      * local Room DB on a background thread.
@@ -169,20 +209,21 @@ object Sankofa {
     @JvmStatic
     @JvmOverloads
     fun track(eventName: String, properties: Map<String, Any> = emptyMap()) {
-        if (!isInitialized && eventName != "\$app_opened") {
+        if (!isInitialized && eventName != "$app_opened" && eventName != "$app_open_first_time" && eventName != "$session_start") {
             logger.warn("❌ Sankofa.track() called before init()")
             return
         }
 
         scope.launch {
-            sessionManager.refresh()
+            if (isInitialized) sessionManager.refresh()
 
             val event = buildMap<String, Any> {
                 put("type", "track")
                 put("event_name", eventName)
                 put("distinct_id", identity.distinctId)
                 put("properties", buildMap<String, Any> {
-                    sessionManager.sessionId?.let { put("\$session_id", it) }
+                    put("$session_id", sessionManager.sessionId)
+                    put("$screen_name", currentScreen)
                     putAll(properties)
                 })
                 put("default_properties", defaultProperties)
@@ -198,7 +239,7 @@ object Sankofa {
             val rc = replayConfig
             if (rc != null && rc.highFidelityTriggers.contains(eventName)) {
                 logger.debug("🚀 High-fidelity trigger: $eventName")
-                // Future: switch replay to high-fidelity mode for rc.highFidelityDurationSeconds
+                // Future: switch replay to high-fidelity mode
             }
         }
     }
@@ -211,7 +252,11 @@ object Sankofa {
     fun identify(userId: String) {
         assertInitialized("identify") ?: return
         scope.launch {
-            val aliasEvent = identity.identify(userId) ?: return@launch
+            val aliasEvent = identity.identify(userId).toMutableMap()
+            (aliasEvent["properties"] as? MutableMap<String, Any>)?.apply {
+                put("$session_id", sessionManager.sessionId)
+                put("$screen_name", currentScreen)
+            }
             queueManager.enqueue(aliasEvent)
             queueManager.flush()
             replayUploader.setDistinctId(userId)
@@ -242,7 +287,11 @@ object Sankofa {
                 "type" to "people",
                 "distinct_id" to identity.distinctId,
                 "timestamp" to currentIsoTimestamp(),
-                "\$set" to properties,
+                "properties" to (properties + mapOf(
+                    "$session_id" to sessionManager.sessionId,
+                    "$screen_name" to currentScreen
+                )),
+                "default_properties" to defaultProperties
             )
             queueManager.enqueue(event)
             queueManager.flush()
