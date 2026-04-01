@@ -126,6 +126,10 @@ object Sankofa {
         // Wire SyncWorker → queueManager reference
         SyncWorker.queueManagerRef = queueManager
 
+        queueManager.onCommandsReceived = { commands ->
+            handleServerCommands(commands)
+        }
+
         // Replay subsystem
         val bitmapPool = BitmapPool(logger)
         replayUploader = ReplayUploader(
@@ -391,5 +395,17 @@ object Sankofa {
             logger.warn("❌ Sankofa.$method() called before init()")
             null
         } else Unit
+    }
+
+    private fun handleServerCommands(commands: List<dev.sankofa.sdk.network.SankofaCommand>) {
+        commands.forEach { cmd ->
+            if (cmd.type == "CAPTURE_PRISTINE") {
+                val screen = cmd.params?.get("screen") as? String
+                if (screen != null) {
+                    logger.debug("🔥 📸 Server requested pristine capture for $screen")
+                    replayRecorder.triggerHighFidelityMode(1000L)
+                }
+            }
+        }
     }
 }

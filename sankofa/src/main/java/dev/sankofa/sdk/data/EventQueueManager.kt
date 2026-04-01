@@ -32,6 +32,7 @@ internal class EventQueueManager(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
     dao: EventDao? = null,
 ) {
+    var onCommandsReceived: ((List<SankofaCommand>) -> Unit)? = null
     private val dao: EventDao = dao ?: AppDatabase.getInstance(context).eventDao()
     private val gson = Gson()
     private val flushMutex = Mutex()
@@ -66,11 +67,15 @@ internal class EventQueueManager(
             val payloads = events.map { gson.fromJson(it.payload, Map::class.java) }
 
             @Suppress("UNCHECKED_CAST")
-            val success = httpClient.sendBatch(payloads as List<Map<String, Any>>)
+            val response = httpClient.sendBatch(payloads as List<Map<String, Any>>)
 
-            if (success) {
+            if (response.success) {
                 dao.deleteEvents(events.map { it.id })
                 logger.debug("✅ Flushed ${events.size} events")
+                
+                response.commands?.let { 
+                    onCommandsReceived?.invoke(it)
+                }
             } else {
                 logger.debug("⚠️ Flush failed – events retained for next attempt")
             }

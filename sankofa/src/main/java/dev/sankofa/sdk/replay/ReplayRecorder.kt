@@ -133,16 +133,30 @@ internal class ReplayRecorder(
         logger.debug("🛑 ReplayRecorder stopped")
     }
 
+    /**
+     * Momentarily triggers high-fidelity mode.
+     * In the current implementation, this forces an immediate one-shot capture.
+     */
+    fun triggerHighFidelityMode(durationMs: Long) {
+        val decor = decorView ?: return
+        val ctx = decor.context
+        if (ctx is Activity) {
+            ctx.runOnUiThread {
+                onDraw(ctx, forced = true)
+            }
+        }
+    }
+
     fun destroy() {
         stopRecording()
         scope.cancel()
         pixelCopyThread.quitSafely()
     }
 
-    private fun onDraw(activity: Activity) {
+    private fun onDraw(activity: Activity, forced: Boolean = false) {
         // Guard: throttle to 2 frames per second (500ms)
         val now = System.currentTimeMillis()
-        if (now - lastCaptureTimeMs < 500) return
+        if (!forced && now - lastCaptureTimeMs < 500) return
 
         // Guard: skip if a capture is already in flight
         if (!isCapturing.compareAndSet(false, true)) return
