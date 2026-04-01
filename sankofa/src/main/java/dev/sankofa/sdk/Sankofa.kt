@@ -9,6 +9,8 @@ import dev.sankofa.sdk.core.SankofaSessionManager
 import dev.sankofa.sdk.data.EventQueueManager
 import dev.sankofa.sdk.network.SankofaHttpClient
 import dev.sankofa.sdk.network.SyncWorker
+import dev.sankofa.sdk.network.SankofaCommand
+import dev.sankofa.sdk.network.SankofaResponse
 import dev.sankofa.sdk.replay.BitmapPool
 import dev.sankofa.sdk.replay.ReplayConfig
 import dev.sankofa.sdk.replay.ReplayRecorder
@@ -397,7 +399,7 @@ object Sankofa {
         } else Unit
     }
 
-    private fun handleServerCommands(commands: List<dev.sankofa.sdk.network.SankofaCommand>) {
+    private fun handleServerCommands(commands: List<SankofaCommand>) {
         commands.forEach { cmd ->
             if (cmd.type == "CAPTURE_PRISTINE") {
                 val screen = cmd.params?.get("screen") as? String

@@ -12,6 +12,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import dev.sankofa.sdk.network.SankofaCommand
+import dev.sankofa.sdk.network.SankofaResponse
 
 /**
  * The offline-first event queue.
