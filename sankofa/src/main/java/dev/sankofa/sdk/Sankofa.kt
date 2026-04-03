@@ -76,13 +76,14 @@ object Sankofa {
     private val gson = Gson()
 
     internal fun onActivityResumed(activity: android.app.Activity) {
-        // 🚀 Hierarchy: Manual Tag > Auto Fallback
+        // 🚀 Hierarchy: Manual Tag > Annotation Tag > Auto Fallback
         // Reset manual screen on every Activity change unless it's the same Activity
         if (isManualScreen) {
             isManualScreen = false
         }
         
-        currentScreen = activity.javaClass.simpleName
+        val annotation = activity::class.java.getAnnotation(SankofaScreen::class.java)
+        currentScreen = annotation?.name ?: activity.javaClass.simpleName
         logger.debug("📍 Auto-tagged screen: $currentScreen")
     }
 
