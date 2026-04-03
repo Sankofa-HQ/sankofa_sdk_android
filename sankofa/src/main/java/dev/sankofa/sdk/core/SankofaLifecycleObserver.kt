@@ -6,6 +6,7 @@ import android.os.Bundle
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import dev.sankofa.sdk.Sankofa
 import dev.sankofa.sdk.data.EventQueueManager
 import dev.sankofa.sdk.network.SyncWorker
 import dev.sankofa.sdk.replay.ReplayRecorder

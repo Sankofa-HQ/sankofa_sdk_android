@@ -83,7 +83,7 @@ internal class ReplayRecorder(
                     }
 
                     val absY = event.y.toInt() + scrollOffsetY
-                    val screen = dev.sankofa.sdk.Sankofa.getSnapshot()["$screen_name"] as? String ?: "Unknown"
+                    val screen = dev.sankofa.sdk.Sankofa.getCurrentScreenName()
 
                     uploader.enqueueTouchEvent(
                         x = event.x.toInt(), 
@@ -236,7 +236,7 @@ internal class ReplayRecorder(
             decorView?.let { root ->
                 findActiveScrollView(root)?.let { scrollOffsetY = it.scrollY }
             }
-            val screen = dev.sankofa.sdk.Sankofa.getSnapshot()["$screen_name"] as? String ?: "Unknown"
+            val screen = dev.sankofa.sdk.Sankofa.getCurrentScreenName()
 
             // Step 2: Compress and upload purely in the background
             scope.launch {

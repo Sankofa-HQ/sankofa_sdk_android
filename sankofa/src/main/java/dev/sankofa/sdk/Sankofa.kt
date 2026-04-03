@@ -69,6 +69,8 @@ object Sankofa {
     /** The current screen name for stateful tagging (Heatmaps). */
     private var currentScreen: String = "Unknown"
     private var isManualScreen: Boolean = false
+    
+    internal fun getCurrentScreenName(): String = currentScreen
 
     private val scope = CoroutineScope(Dispatchers.IO)
     private val gson = Gson()
@@ -177,14 +179,14 @@ object Sankofa {
             val isFirstOpen = !prefs.getBoolean("first_open_detected", false)
             if (isFirstOpen) {
                 prefs.edit().putBoolean("first_open_detected", true).apply()
-                track("$app_open_first_time")
+                track("\$app_open_first_time")
             }
 
             if (config.trackLifecycleEvents) {
-                track("$app_opened")
+                track("\$app_opened")
             }
             
-            track("$session_start")
+            track("\$session_start")
             
             isInitialized = true
             logger.debug("⚡ Sankofa initialized (debug=${config.debug})")
@@ -204,7 +206,7 @@ object Sankofa {
     fun screen(name: String, properties: Map<String, Any> = emptyMap()) {
         this.currentScreen = name
         this.isManualScreen = true
-        track("$screen_view", properties + mapOf("$screen_name" to name))
+        track("\$screen_view", properties + mapOf("\$screen_name" to name))
     }
 
     /**
@@ -215,7 +217,7 @@ object Sankofa {
     @JvmStatic
     @JvmOverloads
     fun track(eventName: String, properties: Map<String, Any> = emptyMap()) {
-        if (!isInitialized && eventName != "$app_opened" && eventName != "$app_open_first_time" && eventName != "$session_start") {
+        if (!isInitialized && eventName != "\$app_opened" && eventName != "\$app_open_first_time" && eventName != "\$session_start") {
             logger.warn("❌ Sankofa.track() called before init()")
             return
         }
@@ -228,8 +230,8 @@ object Sankofa {
                 put("event_name", eventName)
                 put("distinct_id", identity.distinctId)
                 put("properties", buildMap<String, Any> {
-                    put("$session_id", sessionManager.sessionId)
-                    put("$screen_name", currentScreen)
+                    put("\$session_id", sessionManager.sessionId)
+                    put("\$screen_name", currentScreen)
                     putAll(properties)
                 })
                 put("default_properties", defaultProperties)
@@ -260,8 +262,8 @@ object Sankofa {
         scope.launch {
             val aliasEvent = identity.identify(userId).toMutableMap()
             (aliasEvent["properties"] as? MutableMap<String, Any>)?.apply {
-                put("$session_id", sessionManager.sessionId)
-                put("$screen_name", currentScreen)
+                put("\$session_id", sessionManager.sessionId)
+                put("\$screen_name", currentScreen)
             }
             queueManager.enqueue(aliasEvent)
             queueManager.flush()
@@ -294,8 +296,8 @@ object Sankofa {
                 "distinct_id" to identity.distinctId,
                 "timestamp" to currentIsoTimestamp(),
                 "properties" to (properties + mapOf(
-                    "$session_id" to sessionManager.sessionId,
-                    "$screen_name" to currentScreen
+                    "\$session_id" to sessionManager.sessionId,
+                    "\$screen_name" to currentScreen
                 )),
                 "default_properties" to defaultProperties
             )
