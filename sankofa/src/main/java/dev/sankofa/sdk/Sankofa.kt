@@ -75,16 +75,33 @@ object Sankofa {
     private val scope = CoroutineScope(Dispatchers.IO)
     private val gson = Gson()
 
-    internal fun onActivityResumed(activity: android.app.Activity) {
-        // 🚀 Hierarchy: Manual Tag > Annotation Tag > Auto Fallback
-        // Reset manual screen on every Activity change unless it's the same Activity
-        if (isManualScreen) {
-            isManualScreen = false
-        }
+    private var lastActivityHash: Int = 0
+
+    internal fun onActivityCreated(activity: android.app.Activity) {
+        // Called before the user's `onCreate` logic executes
+        val hash = System.identityHashCode(activity)
+        lastActivityHash = hash
+        isManualScreen = false
         
         val annotation = activity::class.java.getAnnotation(SankofaScreen::class.java)
         currentScreen = annotation?.name ?: activity.javaClass.simpleName
-        logger.debug("📍 Auto-tagged screen: $currentScreen")
+    }
+
+    internal fun onActivityResumed(activity: android.app.Activity) {
+        val hash = System.identityHashCode(activity)
+        
+        if (lastActivityHash != hash) {
+            // Crossed an activity boundary (e.g. going back in the backstack)
+            lastActivityHash = hash
+            isManualScreen = false
+        }
+        
+        // Only apply the automatic tag if the user didn't explicitly call Sankofa.screen() on this activity
+        if (!isManualScreen) {
+            val annotation = activity::class.java.getAnnotation(SankofaScreen::class.java)
+            currentScreen = annotation?.name ?: activity.javaClass.simpleName
+            logger.debug("📍 Auto-tagged screen: $currentScreen")
+        }
     }
 
     internal fun currentIsoTimestamp(): String {

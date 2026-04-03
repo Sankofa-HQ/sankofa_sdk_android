@@ -112,8 +112,9 @@ internal class SankofaLifecycleObserver(
             replayRecorder.stopRecording()
         }
 
-        // No-ops
-        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+            Sankofa.onActivityCreated(activity)
+        }
         override fun onActivityStarted(activity: Activity) = Unit
         override fun onActivityStopped(activity: Activity) = Unit
         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
