@@ -260,13 +260,16 @@ object Sankofa {
     fun identify(userId: String) {
         assertInitialized("identify") ?: return
         scope.launch {
-            val aliasEvent = identity.identify(userId).toMutableMap()
-            (aliasEvent["properties"] as? MutableMap<String, Any>)?.apply {
-                put("\$session_id", sessionManager.sessionId)
-                put("\$screen_name", currentScreen)
+            val aliasEvent = identity.identify(userId)?.toMutableMap()
+            if (aliasEvent != null) {
+                val props = (aliasEvent["properties"] as? MutableMap<String, Any>) ?: mutableMapOf()
+                props["\$session_id"] = sessionManager.sessionId
+                props["\$screen_name"] = currentScreen
+                aliasEvent["properties"] = props
+                
+                queueManager.enqueue(aliasEvent)
+                queueManager.flush()
             }
-            queueManager.enqueue(aliasEvent)
-            queueManager.flush()
             replayUploader.setDistinctId(userId)
         }
     }

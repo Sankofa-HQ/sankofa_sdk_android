@@ -103,7 +103,9 @@ internal class ReplayRecorder(
     }
 
     private fun findActiveScrollView(view: View): View? {
-        if (view is android.widget.ScrollView || view is android.widget.AbsListView || view is androidx.recyclerview.widget.RecyclerView) {
+        val name = view.javaClass.name
+        if (view is android.widget.ScrollView || view is android.widget.AbsListView || 
+            name.contains("RecyclerView") || name.contains("ScrollView") || name.contains("WebView")) {
             if (view.isShown) return view
         }
         if (view is android.view.ViewGroup) {
