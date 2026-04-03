@@ -18,7 +18,9 @@ internal data class FrameData(
     val bytes: ByteArray,
     val timestampMs: Long,
     val width: Int,
-    val height: Int
+    val height: Int,
+    val scrollOffsetY: Int,
+    val screen: String
 )
 
 /**
@@ -75,9 +77,9 @@ internal class ReplayUploader(
     }
 
     /** Called from [ReplayRecorder] after each frame is compressed. */
-    fun enqueueFrame(compressedFrame: ByteArray, captureTimestamp: Long, width: Int, height: Int) {
+    fun enqueueFrame(compressedFrame: ByteArray, captureTimestamp: Long, width: Int, height: Int, scrollOffsetY: Int, screen: String) {
         if (sessionId.isEmpty()) return
-        frameChannel.trySend(FrameData(compressedFrame, captureTimestamp, width, height))
+        frameChannel.trySend(FrameData(compressedFrame, captureTimestamp, width, height, scrollOffsetY, screen))
     }
 
     /** Called from [ReplayRecorder] when a user touches the screen. */
@@ -100,8 +102,7 @@ internal class ReplayUploader(
                     "type" to type, // 1 = MouseDown, 0 = MouseUp, etc.
                     "id" to 1,
                     "x" to x,
-                    "y" to y,
-                    "abs_y" to absoluteY,
+                    "y" to absoluteY,
                     "scroll_y" to scrollOffsetY,
                     "screen" to screen
                 ),
@@ -124,7 +125,9 @@ internal class ReplayUploader(
         val frames = framesAttemptingUpload.map { 
             mapOf(
                 "timestamp" to it.timestampMs,
-                "image_base64" to Base64.encodeToString(it.bytes, Base64.NO_WRAP)
+                "image_base64" to Base64.encodeToString(it.bytes, Base64.NO_WRAP),
+                "scroll_y" to it.scrollOffsetY,
+                "screen" to it.screen
             )
         }
 

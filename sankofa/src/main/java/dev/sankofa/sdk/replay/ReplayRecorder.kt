@@ -231,11 +231,18 @@ internal class ReplayRecorder(
                 logger.error("❌ Mask compilation failed", e)
             }
             
+            // 🚀 Extract snapshot metadata safely on the Main thread before bouncing to IO
+            var scrollOffsetY = 0
+            decorView?.let { root ->
+                findActiveScrollView(root)?.let { scrollOffsetY = it.scrollY }
+            }
+            val screen = dev.sankofa.sdk.Sankofa.getSnapshot()["$screen_name"] as? String ?: "Unknown"
+
             // Step 2: Compress and upload purely in the background
             scope.launch {
                 try {
                     val compressed = ReplayCompressor.compress(bitmap)
-                    uploader.enqueueFrame(compressed, captureTimestamp, bitmap.width, bitmap.height)
+                    uploader.enqueueFrame(compressed, captureTimestamp, bitmap.width, bitmap.height, scrollOffsetY, screen)
                 } catch (e: Exception) {
                     logger.error("❌ Frame processing failed", e)
                 } finally {
