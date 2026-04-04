@@ -140,7 +140,8 @@ internal class ReplayUploader(
             "device_context" to mapOf(
                 "screen_width" to lastFrame.width,
                 "screen_height" to lastFrame.height,
-                "pixel_ratio" to 1.0
+                "pixel_ratio" to 1.0,
+                "\$os" to "Android"
             ),
             "frames" to frames
         )
