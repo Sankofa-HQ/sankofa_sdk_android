@@ -54,6 +54,17 @@ internal class ReplayRecorder(
     private var drawListener: ViewTreeObserver.OnDrawListener? = null
     private var originalWindowCallback: android.view.Window.Callback? = null
 
+    // ── Double-tap recognition ────────────────────────────────────────────
+    // When two ACTION_DOWN events fire within DOUBLE_TAP_INTERVAL_MS and
+    // DOUBLE_TAP_RADIUS_PX of each other, we emit an additional touch event
+    // with type = 4 (rrweb dblclick) so the dashboard can render a "2×"
+    // marker overlay distinct from regular taps.
+    private val doubleTapIntervalMs = 350L
+    private val doubleTapRadiusPx = 25
+    private var lastTapAt = 0L
+    private var lastTapX = -9999
+    private var lastTapY = -9999
+
     fun startRecording(activity: Activity) {
         stopRecording() // detach from any previous activity first
 
@@ -75,7 +86,7 @@ internal class ReplayRecorder(
             override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
                 if (event.action == android.view.MotionEvent.ACTION_DOWN || event.action == android.view.MotionEvent.ACTION_UP) {
                     val actionType = if (event.action == android.view.MotionEvent.ACTION_DOWN) 1 else 0
-                    
+
                     // 🚀 Infinite Scroll Support: Find active scroll offset
                     var scrollOffsetY = 0
                     findActiveScrollView(decor)?.let {
@@ -84,16 +95,51 @@ internal class ReplayRecorder(
 
                     val absY = event.y.toInt() + scrollOffsetY
                     val screen = dev.sankofa.sdk.Sankofa.getCurrentScreenName()
+                    val now = System.currentTimeMillis()
+                    val ex = event.x.toInt()
+                    val ey = event.y.toInt()
 
                     uploader.enqueueTouchEvent(
-                        x = event.x.toInt(), 
-                        y = event.y.toInt(), 
+                        x = ex,
+                        y = ey,
                         absoluteY = absY,
                         scrollOffsetY = scrollOffsetY,
                         screen = screen,
-                        timestamp = System.currentTimeMillis(), 
+                        timestamp = now,
                         type = actionType
                     )
+
+                    // ── Double-tap recognition (ACTION_DOWN only) ──────────
+                    if (event.action == android.view.MotionEvent.ACTION_DOWN) {
+                        val dt = now - lastTapAt
+                        val dx = ex - lastTapX
+                        val dy = ey - lastTapY
+                        val isDouble =
+                            lastTapAt > 0 &&
+                            dt < doubleTapIntervalMs &&
+                            dx * dx + dy * dy <
+                                doubleTapRadiusPx * doubleTapRadiusPx
+
+                        if (isDouble) {
+                            uploader.enqueueTouchEvent(
+                                x = ex,
+                                y = ey,
+                                absoluteY = absY,
+                                scrollOffsetY = scrollOffsetY,
+                                screen = screen,
+                                timestamp = now,
+                                type = 4 // rrweb dblclick
+                            )
+                            // Reset so a third tap doesn't fire another double.
+                            lastTapAt = 0L
+                            lastTapX = -9999
+                            lastTapY = -9999
+                        } else {
+                            lastTapAt = now
+                            lastTapX = ex
+                            lastTapY = ey
+                        }
+                    }
                 }
                 return existingCallback.dispatchTouchEvent(event)
             }
