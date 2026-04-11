@@ -75,7 +75,15 @@ internal class ReplayRecorder(
         bitmapPool.configure(w, h)
         decorView = decor
 
-        val listener = ViewTreeObserver.OnDrawListener { onDraw(activity) }
+        // We defer the actual capture to `decor.post { onDraw(...) }` so it
+        // runs AFTER the current draw cycle completes. OnDrawListener fires
+        // *before* the surface is committed, so capturing inline can yield
+        // a half-painted/empty bitmap during navigation transitions. Posting
+        // to the next message loop iteration guarantees the surface has the
+        // committed pixels of the frame this listener was triggered for.
+        val listener = ViewTreeObserver.OnDrawListener {
+            decor.post { onDraw(activity) }
+        }
         decor.viewTreeObserver.addOnDrawListener(listener)
         drawListener = listener
 
@@ -224,22 +232,45 @@ internal class ReplayRecorder(
             return
         }
 
+        // 🔒 Mask snapshot — collected on the SAME UI-thread tick as the
+        // capture call below, so the rects are guaranteed to align with
+        // the view positions baked into the bitmap. This eliminates the
+        // race where a delayed mask pass would draw onto stale geometry
+        // (a bug that left RN TextInputs visible during screen animations).
+        val maskRects = try {
+            MaskTraversal.collectMaskRects(decor, maskAllInputs)
+        } catch (e: Exception) {
+            logger.error("❌ Mask collection failed", e)
+            emptyList()
+        }
+
+        // 🚀 Capture scroll + screen metadata in the same UI tick.
+        var scrollOffsetY = 0
+        findActiveScrollView(decor)?.let { scrollOffsetY = it.scrollY }
+        val screen = dev.sankofa.sdk.Sankofa.getCurrentScreenName()
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            captureWithPixelCopy(activity, bitmap)
+            captureWithPixelCopy(activity, bitmap, maskRects, scrollOffsetY, screen)
         } else {
-            captureWithCanvas(activity, bitmap)
+            captureWithCanvas(activity, bitmap, maskRects, scrollOffsetY, screen)
         }
     }
 
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
-    private fun captureWithPixelCopy(activity: Activity, bitmap: Bitmap) {
+    private fun captureWithPixelCopy(
+        activity: Activity,
+        bitmap: Bitmap,
+        maskRects: List<android.graphics.Rect>,
+        scrollOffsetY: Int,
+        screen: String,
+    ) {
         val captureTimestamp = System.currentTimeMillis()
         PixelCopy.request(
             activity.window,
             bitmap,
             { copyResult ->
                 if (copyResult == PixelCopy.SUCCESS) {
-                    processCapture(activity, bitmap, captureTimestamp)
+                    processCapture(bitmap, maskRects, scrollOffsetY, screen, captureTimestamp)
                 } else {
                     logger.debug("⚠️ PixelCopy failed ($copyResult) – dropping frame to prevent ANR")
                     bitmapPool.release(bitmap)
@@ -250,7 +281,13 @@ internal class ReplayRecorder(
         )
     }
 
-    private fun captureWithCanvas(activity: Activity, bitmap: Bitmap) {
+    private fun captureWithCanvas(
+        activity: Activity,
+        bitmap: Bitmap,
+        maskRects: List<android.graphics.Rect>,
+        scrollOffsetY: Int,
+        screen: String,
+    ) {
         val decor = decorView
         if (decor == null) {
             bitmapPool.release(bitmap)
@@ -260,7 +297,7 @@ internal class ReplayRecorder(
         try {
             val canvas = Canvas(bitmap)
             decor.draw(canvas)
-            processCapture(activity, bitmap)
+            processCapture(bitmap, maskRects, scrollOffsetY, screen)
         } catch (e: Exception) {
             logger.error("❌ Canvas capture failed", e)
             bitmapPool.release(bitmap)
@@ -268,36 +305,76 @@ internal class ReplayRecorder(
         }
     }
 
-    private fun processCapture(activity: Activity, bitmap: Bitmap, captureTimestamp: Long = System.currentTimeMillis()) {
-        // Step 1: Traverse and apply masks on the Main Thread (UI MUST be touched on Main Thread)
-        activity.runOnUiThread {
+    private fun processCapture(
+        bitmap: Bitmap,
+        maskRects: List<android.graphics.Rect>,
+        scrollOffsetY: Int,
+        screen: String,
+        captureTimestamp: Long = System.currentTimeMillis(),
+    ) {
+        // Step 1: Apply pre-collected masks. Drawing onto a Bitmap is
+        // thread-safe, so we stay on the IO scope and skip the bounce
+        // back to the UI thread. This is what eliminates the mask race.
+        scope.launch {
             try {
-                decorView?.let { root ->
-                    MaskTraversal.applyMasks(bitmap, root, maskAllInputs)
+                // Drop blank/uniform frames before doing any work.
+                // These appear during RN navigation transitions when the
+                // new screen container is laid out but its children haven't
+                // been attached yet — PixelCopy succeeds but returns the
+                // window background, which the dashboard then renders as a
+                // "massive white screen".
+                if (isBlankFrame(bitmap)) {
+                    logger.debug("⏭ Skipping blank/uniform frame (likely mid-transition)")
+                    return@launch
                 }
+                MaskTraversal.drawMaskRects(bitmap, maskRects)
+                val compressed = ReplayCompressor.compress(bitmap)
+                uploader.enqueueFrame(compressed, captureTimestamp, bitmap.width, bitmap.height, scrollOffsetY, screen)
             } catch (e: Exception) {
-                logger.error("❌ Mask compilation failed", e)
-            }
-            
-            // 🚀 Extract snapshot metadata safely on the Main thread before bouncing to IO
-            var scrollOffsetY = 0
-            decorView?.let { root ->
-                findActiveScrollView(root)?.let { scrollOffsetY = it.scrollY }
-            }
-            val screen = dev.sankofa.sdk.Sankofa.getCurrentScreenName()
-
-            // Step 2: Compress and upload purely in the background
-            scope.launch {
-                try {
-                    val compressed = ReplayCompressor.compress(bitmap)
-                    uploader.enqueueFrame(compressed, captureTimestamp, bitmap.width, bitmap.height, scrollOffsetY, screen)
-                } catch (e: Exception) {
-                    logger.error("❌ Frame processing failed", e)
-                } finally {
-                    bitmapPool.release(bitmap)
-                    isCapturing.set(false)
-                }
+                logger.error("❌ Frame processing failed", e)
+            } finally {
+                bitmapPool.release(bitmap)
+                isCapturing.set(false)
             }
         }
+    }
+
+    /**
+     * Detects "empty" captures: bitmaps where every sampled pixel is the
+     * same color (all transparent, all white, all black, etc.).
+     *
+     * Why sampling instead of a full scan: a 1080×2400 bitmap has 2.6M pixels.
+     * A 9-point sample covers the corners + edges + center, which is enough
+     * to catch a uniformly-colored frame in O(1) without scanning the whole
+     * thing on the IO thread. False negatives (frames with content but
+     * uniform sample points) are essentially impossible with a 9-point grid;
+     * false positives (1×1 solid-color screens) are not real apps.
+     */
+    private fun isBlankFrame(bitmap: Bitmap): Boolean {
+        if (bitmap.isRecycled) return true
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w < 4 || h < 4) return true
+
+        // 9-point grid: corners + edges + center (with a small inset to
+        // skip status-bar / nav-bar artifacts that are uniform by design).
+        val insetX = (w * 0.1f).toInt().coerceAtLeast(1)
+        val insetY = (h * 0.15f).toInt().coerceAtLeast(1)
+        val samples = intArrayOf(
+            bitmap.getPixel(insetX, insetY),
+            bitmap.getPixel(w / 2, insetY),
+            bitmap.getPixel(w - insetX - 1, insetY),
+            bitmap.getPixel(insetX, h / 2),
+            bitmap.getPixel(w / 2, h / 2),
+            bitmap.getPixel(w - insetX - 1, h / 2),
+            bitmap.getPixel(insetX, h - insetY - 1),
+            bitmap.getPixel(w / 2, h - insetY - 1),
+            bitmap.getPixel(w - insetX - 1, h - insetY - 1),
+        )
+        val first = samples[0]
+        for (i in 1 until samples.size) {
+            if (samples[i] != first) return false
+        }
+        return true
     }
 }
