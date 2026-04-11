@@ -66,41 +66,106 @@ object Sankofa {
     private var replayConfig: ReplayConfig? = null
     private var isInitialized = false
 
-    /** The current screen name for stateful tagging (Heatmaps). */
-    private var currentScreen: String = "Unknown"
+    /**
+     * The current screen name for stateful tagging (Heatmaps, Replays).
+     *
+     * Empty string is the sentinel for "not yet tagged". The replay
+     * recorder and uploader skip frames + touch events while this is
+     * empty so they're never attributed to the wrong screen.
+     */
+    private var currentScreen: String = ""
     private var isManualScreen: Boolean = false
-    
+
     internal fun getCurrentScreenName(): String = currentScreen
+
+    /**
+     * Returns true when [currentScreen] has not been tagged yet (either
+     * via [SankofaScreen] annotation, manual [screen] call, or activity
+     * fallback). Used by the replay recorder to skip cold-start frames
+     * that would otherwise be tagged with the wrong screen name.
+     */
+    internal fun hasTaggedScreen(): Boolean = currentScreen.isNotEmpty()
 
     private val scope = CoroutineScope(Dispatchers.IO)
     private val gson = Gson()
 
     private var lastActivityHash: Int = 0
 
+    /**
+     * Activity class names that should NEVER be used as automatic
+     * screen tags, because they're framework host activities — there's
+     * exactly one of them per app and they tell us nothing about which
+     * UI the user is actually viewing. Screen tagging in these
+     * frameworks is the host language's responsibility:
+     *
+     *  - React Native: `useSankofaScreen` / `Sankofa.screen()` from JS
+     *  - Flutter: `SankofaNavigatorObserver`
+     *  - Compose: `SankofaScreen` annotation on the parent activity
+     *    (which would shortcut this list anyway), or `Sankofa.screen()`
+     *    from a NavHost listener
+     *
+     * If we DID auto-tag from these classes, every cold-start frame
+     * would be attributed to "MainActivity" instead of the user's
+     * actual screen, and the dashboard would show "Awaiting Snapshot"
+     * because the screen the user navigated to in the dashboard never
+     * appears in `screen_backgrounds`.
+     */
+    private val NON_TAGGABLE_HOST_ACTIVITIES = setOf(
+        // React Native
+        "MainActivity",
+        "ReactActivity",
+        "MainReactActivity",
+        // Flutter
+        "FlutterActivity",
+        "FlutterFragmentActivity",
+    )
+
+    /**
+     * Resolve the auto-tag screen name for an activity, returning
+     * empty string when the activity is a framework host that should
+     * be ignored. The annotation always wins if present.
+     */
+    private fun resolveAutoTag(activity: android.app.Activity): String {
+        val annotation = activity::class.java.getAnnotation(SankofaScreen::class.java)
+        if (annotation != null) return annotation.name
+        val simpleName = activity.javaClass.simpleName
+        return if (simpleName in NON_TAGGABLE_HOST_ACTIVITIES) "" else simpleName
+    }
+
     internal fun onActivityCreated(activity: android.app.Activity) {
         // Called before the user's `onCreate` logic executes
         val hash = System.identityHashCode(activity)
         lastActivityHash = hash
         isManualScreen = false
-        
-        val annotation = activity::class.java.getAnnotation(SankofaScreen::class.java)
-        currentScreen = annotation?.name ?: activity.javaClass.simpleName
+
+        val tag = resolveAutoTag(activity)
+        if (tag.isNotEmpty()) {
+            currentScreen = tag
+        }
+        // If tag is empty (RN/Flutter host activity), preserve whatever
+        // currentScreen was before — usually empty on first launch, or
+        // the previous JS-set value on hot reload — and let the host
+        // language tag it explicitly via Sankofa.screen().
     }
 
     internal fun onActivityResumed(activity: android.app.Activity) {
         val hash = System.identityHashCode(activity)
-        
+
         if (lastActivityHash != hash) {
             // Crossed an activity boundary (e.g. going back in the backstack)
             lastActivityHash = hash
             isManualScreen = false
         }
-        
+
         // Only apply the automatic tag if the user didn't explicitly call Sankofa.screen() on this activity
         if (!isManualScreen) {
-            val annotation = activity::class.java.getAnnotation(SankofaScreen::class.java)
-            currentScreen = annotation?.name ?: activity.javaClass.simpleName
-            logger.debug("📍 Auto-tagged screen: $currentScreen")
+            val tag = resolveAutoTag(activity)
+            if (tag.isNotEmpty()) {
+                currentScreen = tag
+                logger.debug("📍 Auto-tagged screen: $currentScreen")
+            }
+            // Empty tag → framework host activity, leave currentScreen
+            // alone so the host language's screen() call wins.
         }
     }
 

@@ -103,6 +103,17 @@ internal class ReplayRecorder(
 
                     val absY = event.y.toInt() + scrollOffsetY
                     val screen = dev.sankofa.sdk.Sankofa.getCurrentScreenName()
+                    // 🚦 Skip touch events while the screen is untagged.
+                    // RN/Flutter apps tag screens from JS/Dart on mount,
+                    // and the first few user interactions during cold-start
+                    // would otherwise be attributed to whatever activity
+                    // class name was used as the host (or to nothing).
+                    // Better to lose a couple of cold-start taps than to
+                    // pollute the heatmap with an "unknown" screen bucket
+                    // the dashboard cannot match.
+                    if (screen.isEmpty()) {
+                        return existingCallback.dispatchTouchEvent(event)
+                    }
                     val now = System.currentTimeMillis()
                     val ex = event.x.toInt()
                     val ey = event.y.toInt()
@@ -213,6 +224,20 @@ internal class ReplayRecorder(
         // Guard: throttle to 2 frames per second (500ms)
         val now = System.currentTimeMillis()
         if (!forced && now - lastCaptureTimeMs < 500) return
+
+        // 🚦 Skip captures while the screen is untagged.
+        // RN/Flutter apps tag screens from the JS/Dart side on mount,
+        // and the first few cold-start frames would otherwise be
+        // attributed to the host activity class name (e.g. "MainActivity"
+        // for RN). Those rows then never match the screen the user
+        // navigates to in the dashboard heatmap viewer, leaving the
+        // Android tab stuck on "Awaiting Snapshot" forever.
+        //
+        // We deliberately read currentScreen on the UI thread BEFORE
+        // we acquire a bitmap so we don't waste a pool slot on a frame
+        // we're going to drop. The check happens again later (after the
+        // PixelCopy callback fires) using the captured-tick value.
+        if (!dev.sankofa.sdk.Sankofa.hasTaggedScreen()) return
 
         // Guard: skip if a capture is already in flight
         if (!isCapturing.compareAndSet(false, true)) return
