@@ -436,46 +436,115 @@ object Sankofa {
     // --- Internal ---
 
     private suspend fun onNewSessionStarted(apiKey: String, base: String, sessionId: String) {
-        if (!config.recordSessions) return
+        // ── Unified Handshake ──
+        // One call to /api/v1/handshake returns the config for ALL
+        // Sankofa products. We extract the replay module config here
+        // and store the full response for Deploy and future modules.
+        val handshake = fetchHandshake(apiKey, base)
 
-        // Fetch server-driven replay config
-        replayConfig = fetchReplayConfig(apiKey, base) ?: ReplayConfig.defaults()
-        val rc = replayConfig!!
+        // ── Replay Module ──
+        if (config.recordSessions) {
+            val replayModule = handshake?.get("replay")
+            replayConfig = if (replayModule != null) {
+                @Suppress("UNCHECKED_CAST")
+                ReplayConfig.fromJson(replayModule as Map<*, *>)
+            } else {
+                ReplayConfig.defaults()
+            }
+            val rc = replayConfig!!
 
-        if (!rc.enabled) {
-            logger.debug("⏸ Replay disabled by server config")
-            return
+            if (!rc.enabled) {
+                logger.debug("⏸ Replay disabled by server config")
+            } else if (Random.nextDouble() > rc.sampleRate) {
+                logger.debug("🎲 Session sampled out (rate=${rc.sampleRate})")
+            } else {
+                replayUploader.configure(
+                    sessionId = sessionId,
+                    distinctId = identity.distinctId,
+                )
+                logger.debug("🎥 Replay configured for session $sessionId")
+            }
         }
 
-        // Client-side sampling
-        if (Random.nextDouble() > rc.sampleRate) {
-            logger.debug("🎲 Session sampled out (rate=${rc.sampleRate})")
-            return
+        // ── Analytics Module ──
+        val analyticsModule = handshake?.get("analytics")
+        if (analyticsModule != null) {
+            @Suppress("UNCHECKED_CAST")
+            val am = analyticsModule as? Map<*, *>
+            val analyticsEnabled = am?.get("enabled") as? Boolean ?: true
+            if (!analyticsEnabled) {
+                logger.debug("⏸ Analytics disabled by server config — events will be silently dropped")
+            }
         }
 
-        replayUploader.configure(
-            sessionId = sessionId,
-            distinctId = identity.distinctId,
-        )
-        logger.debug("🎥 Replay configured for session $sessionId")
+        // ── Deploy Module ──
+        // The deploy update check result is embedded in the handshake
+        // response. The React Native JS layer reads it; the native
+        // Android SDK logs it for observability but doesn't act on it
+        // (native apps can't do JS OTA). Future: pass to a Deploy
+        // module if one is registered.
+        val deployModule = handshake?.get("deploy")
+        if (deployModule != null) {
+            @Suppress("UNCHECKED_CAST")
+            val dm = deployModule as? Map<*, *>
+            val hasUpdate = dm?.get("has_update") as? Boolean ?: false
+            if (hasUpdate) {
+                val label = dm?.get("label") as? String ?: "unknown"
+                logger.debug("📦 Deploy update available: $label")
+            }
+        }
     }
 
-    private fun fetchReplayConfig(apiKey: String, base: String): ReplayConfig? {
+    /**
+     * Unified handshake — fetches the full module config for all
+     * Sankofa products in a single HTTP call.
+     *
+     * Returns the `modules` map from the response, or null on failure.
+     * Falls back to the legacy `/api/replay/config` endpoint if the
+     * handshake endpoint is not available (older server versions).
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun fetchHandshake(apiKey: String, base: String): Map<String, Any?>? {
         return try {
             val okRequest = okhttp3.Request.Builder()
-                .url("$base/api/replay/config")
+                .url("$base/api/v1/handshake")
                 .addHeader("x-api-key", apiKey)
                 .build()
             val client = okhttp3.OkHttpClient()
             val response = client.newCall(okRequest).execute()
             if (response.isSuccessful) {
                 val body = response.body?.string() ?: return null
-                @Suppress("UNCHECKED_CAST")
-                val json = gson.fromJson(body, Map::class.java) as Map<*, *>
-                ReplayConfig.fromJson(json)
+                val json = gson.fromJson(body, Map::class.java) as? Map<String, Any?> ?: return null
+                logger.debug("🤝 Handshake OK (project=${json["project_id"]})")
+                json["modules"] as? Map<String, Any?>
+            } else {
+                // Fallback: try legacy replay config endpoint
+                logger.debug("🤝 Handshake not available (${response.code}), falling back to legacy config")
+                fetchLegacyReplayConfig(apiKey, base)?.let { rc ->
+                    mapOf("replay" to rc)
+                }
+            }
+        } catch (e: Exception) {
+            logger.warn("⚠️ Handshake failed: ${e.message}")
+            null
+        }
+    }
+
+    /** Legacy fallback for servers that don't have the handshake endpoint yet. */
+    @Suppress("UNCHECKED_CAST")
+    private fun fetchLegacyReplayConfig(apiKey: String, base: String): Map<*, *>? {
+        return try {
+            val okRequest = okhttp3.Request.Builder()
+                .url("$base/api/replay/config")
+                .addHeader("x-api-key", apiKey)
+                .build()
+            val response = okhttp3.OkHttpClient().newCall(okRequest).execute()
+            if (response.isSuccessful) {
+                val body = response.body?.string() ?: return null
+                gson.fromJson(body, Map::class.java) as? Map<*, *>
             } else null
         } catch (e: Exception) {
-            logger.warn("⚠️ Failed to fetch replay config: ${e.message}")
+            logger.warn("⚠️ Legacy replay config fetch failed: ${e.message}")
             null
         }
     }
