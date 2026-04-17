@@ -190,6 +190,10 @@ object Sankofa {
         this.config = config
         this.appContext = context.applicationContext
 
+        // Traffic Cop: flip core-ready so modules registered AFTER this
+        // point don't emit the "registered before init()" warning.
+        dev.sankofa.sdk.core.SankofaModuleRegistry.markCoreInitialized()
+
         logger = SankofaLogger(config.debug)
         identity = SankofaIdentity(appContext, logger)
 
@@ -506,8 +510,12 @@ object Sankofa {
     @Suppress("UNCHECKED_CAST")
     private fun fetchHandshake(apiKey: String, base: String): Map<String, Any?>? {
         return try {
+            // Reverse Handshake: report which modules this binary ships with
+            // so the dashboard can gate UI for modules the SDK lacks.
+            val installed = dev.sankofa.sdk.core.SankofaModuleRegistry.getInstalledModules().joinToString(",")
+            val encoded = java.net.URLEncoder.encode(installed, "UTF-8")
             val okRequest = okhttp3.Request.Builder()
-                .url("$base/api/v1/handshake")
+                .url("$base/api/v1/handshake?installed=$encoded&sdk=android")
                 .addHeader("x-api-key", apiKey)
                 .build()
             val client = okhttp3.OkHttpClient()
@@ -515,8 +523,17 @@ object Sankofa {
             if (response.isSuccessful) {
                 val body = response.body?.string() ?: return null
                 val json = gson.fromJson(body, Map::class.java) as? Map<String, Any?> ?: return null
-                logger.debug("🤝 Handshake OK (project=${json["project_id"]})")
-                json["modules"] as? Map<String, Any?>
+                logger.debug("🤝 Handshake OK (project=${json["project_id"]}, installed=$installed)")
+                val modules = json["modules"] as? Map<String, Any?>
+
+                // Traffic Cop — route enabled flags to registered modules;
+                // warn (debug) or silent no-op (release) for missing modules.
+                // Non-blocking: launches module handlers in the registry's
+                // own SupervisorJob scope so this caller (a suspend fn)
+                // doesn't deadlock.
+                dev.sankofa.sdk.core.SankofaModuleRegistry.routeHandshake(modules)
+
+                modules
             } else {
                 // Fallback: try legacy replay config endpoint
                 logger.debug("🤝 Handshake not available (${response.code}), falling back to legacy config")
