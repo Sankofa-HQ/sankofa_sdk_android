@@ -99,35 +99,11 @@ Sankofa.setPerson(
 ```
 
 ### Session Replay Privacy
-Sankofa prioritizes user privacy. You can mask sensitive UI elements manually using either a Kotlin extension or a View tag.
+Mask sensitive UI elements from session replays.
 
 ```kotlin
-// Option 1: Kotlin Extension (Recommended)
 myView.sankofaMask = true
-
-// Option 2: View Tag (Works for XML and Java)
-myView.tag = "sankofa_mask"
 ```
-
----
-
-## 🏗 Modular Architecture (For Contributors)
-
-The Sankofa Android SDK is built with a modular, highly-testable architecture:
-
-- **`Sankofa`**: The primary singleton entry point for initialization and public API dispatching.
-- **`EventQueueManager`**: Manages the persistent Room database and background flushing logic.
-- **`SyncWorker`**: Utilizes Android **WorkManager** for reliable background sync, even if the app is closed.
-- **`ReplayRecorder`**: Captures screen changes using **PixelCopy (API 26+)** with a software canvas fallback.
-- **`BitmapPool`**: High-performance memory management using reusable Bitmaps to prevent GC pressure.
-- **`MaskTraversal`**: Post-processing engine that applies privacy masks to the captured frames.
-- **`ReplayUploader`**: Handles WebP-compressed and Gzipped chunk uploads via a non-blocking Kotlin Channel.
-
-### Local Development
-
-1. Clone the repo: `git clone https://github.com/Sankofa-HQ/sankofa_sdk_android`
-2. Run build: `./gradlew assembleRelease`
-3. Run tests: `./gradlew test` (No emulator required)
 
 ---
 
