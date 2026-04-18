@@ -23,6 +23,14 @@ import kotlinx.coroutines.launch
  *     when the optional module IS linked.
  *  3. Emit debug-mode warnings when a dashboard flag references a
  *     module the developer didn't include.
+ *
+ * NOTE: The interface here is `SankofaPluggableModule` — NOT
+ * `SankofaModule`, which already exists as the React Native bridge
+ * class in `sankofa-react-native/android/.../dev/sankofa/rn/SankofaModule.kt`.
+ * Kotlin 2.x's stricter overload resolution treats two same-named
+ * declarations across the classpath as an ambiguity when inside the
+ * Expo Modules `Function(...)` DSL, producing cryptic "Cannot infer
+ * type" errors in the RN bridge. Keeping them distinct avoids it.
  */
 
 enum class SankofaModuleName(val wireName: String) {
@@ -35,8 +43,8 @@ enum class SankofaModuleName(val wireName: String) {
  * Every pluggable module implements this. The Core never imports
  * concrete module classes — it only talks through this interface.
  */
-interface SankofaModule {
-    val moduleName: SankofaModuleName
+interface SankofaPluggableModule {
+    val canonicalName: SankofaModuleName
 
     /**
      * Called by the Core when the handshake response says this module
@@ -49,7 +57,7 @@ interface SankofaModule {
 
 object SankofaModuleRegistry {
     private const val TAG = "Sankofa"
-    private val registered = mutableMapOf<SankofaModuleName, SankofaModule>()
+    private val registered = mutableMapOf<SankofaModuleName, SankofaPluggableModule>()
     @Volatile private var coreInitialized = false
     // Dedicated scope so module handlers survive caller cancellation.
     // SupervisorJob so one module failure doesn't cancel others.
@@ -64,11 +72,11 @@ object SankofaModuleRegistry {
 
     /** Register a module. Called from each module's init path. */
     @Synchronized
-    fun register(module: SankofaModule) {
-        registered[module.moduleName] = module
+    fun register(module: SankofaPluggableModule) {
+        registered[module.canonicalName] = module
 
         if (!coreInitialized && isDebuggable()) {
-            Log.w(TAG, "${module.moduleName.wireName} module was registered before Sankofa.init(). Call init() first so the module can read your API key and endpoint.")
+            Log.w(TAG, "${module.canonicalName.wireName} module was registered before Sankofa.init(). Call init() first so the module can read your API key and endpoint.")
         }
     }
 
