@@ -37,6 +37,8 @@ enum class SankofaModuleName(val wireName: String) {
     ANALYTICS("analytics"),
     DEPLOY("deploy"),
     CATCH("catch"),
+    SWITCH("switch"),
+    CONFIG("config"),
 }
 
 /**
@@ -151,6 +153,45 @@ object SankofaModuleRegistry {
                     }
                 } else if (isDebuggable()) {
                     Log.w(TAG, "Server enabled \"catch\" but SankofaCatch is not linked. Add the Catch SDK to enable crash reporting.")
+                }
+            }
+        }
+
+        // Switch — feature flags
+        (modules["switch"] as? Map<String, Any?>)?.let { switchCfg ->
+            if (switchCfg["enabled"] == true) {
+                val mod = synchronized(this) { registered[SankofaModuleName.SWITCH] }
+                if (mod != null) {
+                    scope.launch {
+                        try {
+                            mod.applyHandshake(switchCfg)
+                        } catch (e: Throwable) {
+                            Log.w(TAG, "switch.applyHandshake failed: ${e.message}")
+                        }
+                    }
+                } else if (isDebuggable()) {
+                    Log.w(TAG, "Server enabled \"switch\" but SankofaSwitch is not linked. Call SankofaSwitch.init(context) after Sankofa.init().")
+                }
+            }
+        }
+
+        // Config — remote config. Class is SankofaRemoteConfig (not
+        // SankofaConfig) because the init-options data class already
+        // owns that name in dev.sankofa.sdk; a duplicate under a
+        // different package would force users to alias one import.
+        (modules["config"] as? Map<String, Any?>)?.let { configCfg ->
+            if (configCfg["enabled"] == true) {
+                val mod = synchronized(this) { registered[SankofaModuleName.CONFIG] }
+                if (mod != null) {
+                    scope.launch {
+                        try {
+                            mod.applyHandshake(configCfg)
+                        } catch (e: Throwable) {
+                            Log.w(TAG, "config.applyHandshake failed: ${e.message}")
+                        }
+                    }
+                } else if (isDebuggable()) {
+                    Log.w(TAG, "Server enabled \"config\" but SankofaRemoteConfig is not linked. Call SankofaRemoteConfig.init(context) after Sankofa.init().")
                 }
             }
         }

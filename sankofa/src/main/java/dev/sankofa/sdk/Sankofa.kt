@@ -507,6 +507,17 @@ object Sankofa {
      * Falls back to the legacy `/api/replay/config` endpoint if the
      * handshake endpoint is not available (older server versions).
      */
+    /**
+     * Cached modules map + ETag from the last successful handshake.
+     * The ETag is sent as `If-None-Match` on the next refresh so the
+     * server can respond with 304 when nothing has changed; the
+     * cached modules are replayed into the Traffic Cop on that 304
+     * path so modules registered between handshakes still pick up the
+     * payload they missed.
+     */
+    @Volatile private var cachedHandshakeModules: Map<String, Any?>? = null
+    @Volatile private var handshakeEtag: String = ""
+
     @Suppress("UNCHECKED_CAST")
     private fun fetchHandshake(apiKey: String, base: String): Map<String, Any?>? {
         return try {
@@ -514,28 +525,41 @@ object Sankofa {
             // so the dashboard can gate UI for modules the SDK lacks.
             val installed = dev.sankofa.sdk.core.SankofaModuleRegistry.getInstalledModules().joinToString(",")
             val encoded = java.net.URLEncoder.encode(installed, "UTF-8")
-            val okRequest = okhttp3.Request.Builder()
+            val requestBuilder = okhttp3.Request.Builder()
                 .url("$base/api/v1/handshake?installed=$encoded&sdk=android")
                 .addHeader("x-api-key", apiKey)
-                .build()
+            val etagSnapshot = handshakeEtag
+            if (etagSnapshot.isNotEmpty()) {
+                requestBuilder.addHeader("If-None-Match", etagSnapshot)
+            }
             val client = okhttp3.OkHttpClient()
-            val response = client.newCall(okRequest).execute()
+            val response = client.newCall(requestBuilder.build()).execute()
+
+            // 304 — cache still current. Re-fire the Traffic Cop so
+            // modules registered between the previous handshake and
+            // now pick up the payload they missed (e.g. hot reload,
+            // late-initialised optional modules).
+            val cached = cachedHandshakeModules
+            if (response.code == 304 && cached != null) {
+                logger.debug("🤝 Handshake 304 — cached modules still current")
+                dev.sankofa.sdk.core.SankofaModuleRegistry.routeHandshake(cached)
+                return cached
+            }
+
             if (response.isSuccessful) {
                 val body = response.body?.string() ?: return null
                 val json = gson.fromJson(body, Map::class.java) as? Map<String, Any?> ?: return null
                 logger.debug("🤝 Handshake OK (project=${json["project_id"]}, installed=$installed)")
                 val modules = json["modules"] as? Map<String, Any?>
+                cachedHandshakeModules = modules
+                handshakeEtag = response.header("etag")
+                    ?: response.header("ETag")
+                    ?: ""
 
-                // Traffic Cop — route enabled flags to registered modules;
-                // warn (debug) or silent no-op (release) for missing modules.
-                // Non-blocking: launches module handlers in the registry's
-                // own SupervisorJob scope so this caller (a suspend fn)
-                // doesn't deadlock.
                 dev.sankofa.sdk.core.SankofaModuleRegistry.routeHandshake(modules)
 
                 modules
             } else {
-                // Fallback: try legacy replay config endpoint
                 logger.debug("🤝 Handshake not available (${response.code}), falling back to legacy config")
                 fetchLegacyReplayConfig(apiKey, base)?.let { rc ->
                     mapOf("replay" to rc)
