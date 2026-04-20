@@ -524,9 +524,45 @@ object Sankofa {
             // Reverse Handshake: report which modules this binary ships with
             // so the dashboard can gate UI for modules the SDK lacks.
             val installed = dev.sankofa.sdk.core.SankofaModuleRegistry.getInstalledModules().joinToString(",")
-            val encoded = java.net.URLEncoder.encode(installed, "UTF-8")
+
+            // Device context — the server's evaluator needs distinct_id
+            // to bucket rollouts deterministically, resolve cohort
+            // membership, and honor user allow-lists. Without these
+            // every handshake looks like a new anonymous user so
+            // cohort targeting can't match and experiments are
+            // non-deterministic.
+            fun enc(v: String): String = java.net.URLEncoder.encode(v, "UTF-8")
+            val params = StringBuilder()
+            params.append("installed=").append(enc(installed))
+            params.append("&sdk=android")
+            params.append("&platform=android")
+            val did = identity.distinctId
+            if (did.isNotEmpty()) {
+                params.append("&distinct_id=").append(enc(did))
+            }
+            // OS version — always available. Build.VERSION.RELEASE is
+            // the marketing version ("14", "13", "11").
+            params.append("&os_version=").append(enc(android.os.Build.VERSION.RELEASE ?: ""))
+            // Device model — helpful for device-model targeting later.
+            params.append("&device_model=").append(enc(android.os.Build.MODEL ?: ""))
+            // App version from the host package info — matches what
+            // the server's semver range comparison expects.
+            try {
+                val pm = appContext.packageManager
+                val info = pm.getPackageInfo(appContext.packageName, 0)
+                val v = info.versionName ?: ""
+                if (v.isNotEmpty()) params.append("&app_version=").append(enc(v))
+            } catch (_: Throwable) {
+                // Missing package info is a real possibility during
+                // instrumentation tests; ship what we have.
+            }
+            // Locale like "en_US" — the server accepts the BCP-47 form
+            // Android uses.
+            val loc = java.util.Locale.getDefault().toString()
+            if (loc.isNotEmpty()) params.append("&locale=").append(enc(loc))
+
             val requestBuilder = okhttp3.Request.Builder()
-                .url("$base/api/v1/handshake?installed=$encoded&sdk=android")
+                .url("$base/api/v1/handshake?$params")
                 .addHeader("x-api-key", apiKey)
             val etagSnapshot = handshakeEtag
             if (etagSnapshot.isNotEmpty()) {
