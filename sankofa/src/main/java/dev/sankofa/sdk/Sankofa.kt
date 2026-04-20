@@ -540,6 +540,14 @@ object Sankofa {
             if (did.isNotEmpty()) {
                 params.append("&distinct_id=").append(enc(did))
             }
+            // Identity stitching — pass the pre-identify anon id alongside
+            // the distinct id so the server can merge pre/post login flag
+            // evaluations and exposures into a single experiment subject.
+            // Only emit when the two diverge (post-identify).
+            val anonId = identity.anonymousId
+            if (anonId.isNotEmpty() && anonId != did) {
+                params.append("&anon_id=").append(enc(anonId))
+            }
             // OS version — always available. Build.VERSION.RELEASE is
             // the marketing version ("14", "13", "11").
             params.append("&os_version=").append(enc(android.os.Build.VERSION.RELEASE ?: ""))
