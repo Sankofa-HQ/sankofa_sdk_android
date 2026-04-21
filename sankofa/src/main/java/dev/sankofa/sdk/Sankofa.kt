@@ -66,6 +66,18 @@ object Sankofa {
     private var replayConfig: ReplayConfig? = null
     private var isInitialized = false
 
+    // Captured at init time — exposed so sibling modules (Catch,
+    // Switch, Config) can authenticate their own API calls without
+    // the host plumbing credentials twice.
+    private var _apiKey: String? = null
+    private var _endpoint: String? = null
+
+    /** The API key passed to init(). Null until init has run. */
+    @JvmStatic fun apiKey(): String? = _apiKey
+
+    /** The server endpoint passed to init(). Null until init has run. */
+    @JvmStatic fun endpoint(): String? = _endpoint
+
     /**
      * The current screen name for stateful tagging (Heatmaps, Replays).
      *
@@ -189,6 +201,8 @@ object Sankofa {
 
         this.config = config
         this.appContext = context.applicationContext
+        this._apiKey = apiKey
+        this._endpoint = config.endpoint
 
         // Traffic Cop: flip core-ready so modules registered AFTER this
         // point don't emit the "registered before init()" warning.
