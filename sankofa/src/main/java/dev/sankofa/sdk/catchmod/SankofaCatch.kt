@@ -68,6 +68,7 @@ object SankofaCatch : SankofaPluggableModule {
     @Volatile private var prefs: SharedPreferences? = null
     @Volatile private var previousHandler: Thread.UncaughtExceptionHandler? = null
     private val handlerInstalled = AtomicBoolean(false)
+    private var anrWatcher: CatchAnrWatcher? = null
     private val flusher = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "sankofa-catch-flusher").apply { isDaemon = true }
     }
@@ -101,7 +102,17 @@ object SankofaCatch : SankofaPluggableModule {
         }
         SankofaModuleRegistry.register(this)
 
-        if (captureUnhandled) installGlobalHandler()
+        if (captureUnhandled) {
+            installGlobalHandler()
+            // ANR watcher runs alongside the uncaught-exception handler
+            // because an ANR doesn't throw — the main thread just
+            // stops draining its queue. Without this, Android's own
+            // ANR dialog is the first signal anyone gets that
+            // something's wrong.
+            anrWatcher = CatchAnrWatcher(capture = { exc ->
+                captureExceptionInternal(exc, type = "anr", level = CatchLevel.ERROR)
+            }).also { it.start() }
+        }
 
         flusher.scheduleAtFixedRate(
             { runCatching { flushInternal() } },
@@ -203,6 +214,13 @@ object SankofaCatch : SankofaPluggableModule {
             sdk = CatchSDKInfo(name = "sankofa.android", version = "android-0.1.0"),
             exception = exception,
             message = message,
+            // Identity correlation — pulled from the core SDK so
+            // Analytics + Replay + Catch events for the same session
+            // join up in the dashboard. Null is tolerable server-side
+            // when the host SDK hasn't initialised yet.
+            distinctId = dev.sankofa.sdk.Sankofa.distinctId(),
+            anonId = dev.sankofa.sdk.Sankofa.anonymousId(),
+            sessionId = dev.sankofa.sdk.Sankofa.currentSessionId(),
             tags = mergedTags(options),
             extra = mergedExtra(options),
             user = options.user ?: user,
@@ -217,6 +235,49 @@ object SankofaCatch : SankofaPluggableModule {
             debugMeta = CatchDebugMetaCapture.capture(),
         )
 
+        buffer.add(event)
+        persistToStorage()
+        if (buffer.size >= BATCH_SIZE) flushInternal()
+        return event.eventId
+    }
+
+    /**
+     * Internal capture path for pre-built CatchException values —
+     * used by the ANR watcher + signal-dump replay, both of which
+     * have a synthetic exception rather than a real Throwable.
+     *
+     * Runs the same event-envelope + identity correlation + debug_meta
+     * build as the throwable/message path.
+     */
+    internal fun captureExceptionInternal(
+        exception: CatchException,
+        type: String,
+        level: CatchLevel,
+    ): String {
+        if (!enabled) return ""
+        if (!shouldSample()) return ""
+
+        val event = CatchEvent(
+            eventId = UUID.randomUUID().toString(),
+            tsMs = System.currentTimeMillis(),
+            environment = environment,
+            level = level,
+            type = type,
+            platform = "android",
+            sdk = CatchSDKInfo(name = "sankofa.android", version = "android-0.1.0"),
+            exception = exception,
+            distinctId = dev.sankofa.sdk.Sankofa.distinctId(),
+            anonId = dev.sankofa.sdk.Sankofa.anonymousId(),
+            sessionId = dev.sankofa.sdk.Sankofa.currentSessionId(),
+            tags = tags.ifEmpty { null },
+            user = user,
+            device = buildDeviceContext(),
+            release = releaseName,
+            breadcrumbs = breadcrumbs.snapshot(),
+            flagSnapshot = readFlagSnapshot?.invoke(),
+            configSnapshot = readConfigSnapshot?.invoke(),
+            debugMeta = CatchDebugMetaCapture.capture(),
+        )
         buffer.add(event)
         persistToStorage()
         if (buffer.size >= BATCH_SIZE) flushInternal()
@@ -343,6 +404,9 @@ object SankofaCatch : SankofaPluggableModule {
                         throwable,
                         CatchMechanism(type = "uncaught_exception_handler", handled = false, description = "thread=${thread.name}"),
                     ),
+                    distinctId = dev.sankofa.sdk.Sankofa.distinctId(),
+                    anonId = dev.sankofa.sdk.Sankofa.anonymousId(),
+                    sessionId = dev.sankofa.sdk.Sankofa.currentSessionId(),
                     user = user,
                     device = buildDeviceContext(),
                     release = releaseName,

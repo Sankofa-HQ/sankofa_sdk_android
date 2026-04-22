@@ -79,6 +79,33 @@ object Sankofa {
     @JvmStatic fun endpoint(): String? = _endpoint
 
     /**
+     * The active session identifier. Rotates on cold start or after
+     * a period of background-inactivity. Exposed so sibling modules
+     * (Catch, custom instrumentation) can stamp the same session_id
+     * on their events — correlation across Analytics/Replay/Catch is
+     * the whole point of having a single session ID.
+     *
+     * Returns null before [init] has run.
+     */
+    @JvmStatic fun currentSessionId(): String? =
+        if (::sessionManager.isInitialized) sessionManager.sessionId else null
+
+    /**
+     * The device-scoped anonymous identifier. Stable across launches
+     * until reinstall. Returns null before [init] has run.
+     */
+    @JvmStatic fun anonymousId(): String? =
+        if (::identity.isInitialized) identity.anonymousId else null
+
+    /**
+     * The identified user ID from [identify], or the anonymous ID
+     * when no identify call has happened yet. Returns null before
+     * [init] has run.
+     */
+    @JvmStatic fun distinctId(): String? =
+        if (::identity.isInitialized) identity.distinctId else null
+
+    /**
      * The current screen name for stateful tagging (Heatmaps, Replays).
      *
      * Empty string is the sentinel for "not yet tagged". The replay
