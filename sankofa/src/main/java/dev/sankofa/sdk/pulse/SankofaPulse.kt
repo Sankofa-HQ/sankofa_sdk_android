@@ -57,6 +57,17 @@ object SankofaPulse : SankofaPluggableModule {
     @Volatile private var appContext: Context? = null
     @Volatile private var cachedSurveys: List<PulseSurvey> = emptyList()
 
+    /**
+     * Lifecycle event listener registry. Buckets are per-event so an
+     * `onCompleted` subscriber doesn't run for `dismissed` events.
+     * `CopyOnWriteArrayList` over a synchronized list because emit
+     * is hot (every show/answer/submit) while subscribe is cold —
+     * letting reads run lock-free is worth the extra allocation on
+     * the rare register/cancel path.
+     */
+    private val listeners: MutableMap<PulseEvent, java.util.concurrent.CopyOnWriteArrayList<PulseEventListener>> =
+        java.util.concurrent.ConcurrentHashMap()
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var refreshJob: Job? = null
 
@@ -165,6 +176,50 @@ object SankofaPulse : SankofaPluggableModule {
     @JvmStatic
     fun refreshSurveys() { refreshSurveysAsync() }
 
+    // ── Lifecycle event subscriptions ───────────────────────────────
+
+    /**
+     * Subscribe to one Pulse lifecycle event. Returns a
+     * [PulseSubscription] handle — call [PulseSubscription.cancel]
+     * to remove the listener. Listeners are dispatched on the
+     * thread that fires the event (UI thread for shown/dismissed,
+     * worker thread for completed/partial_saved).
+     *
+     * Match the Web SDK's `Sankofa.pulse.on(event, listener)` shape
+     * so a host swapping between platforms doesn't relearn the API.
+     */
+    @JvmStatic
+    fun on(event: PulseEvent, listener: PulseEventListener): PulseSubscription {
+        val bucket = listeners.getOrPut(event) {
+            java.util.concurrent.CopyOnWriteArrayList()
+        }
+        bucket.add(listener)
+        return PulseSubscription { bucket.remove(listener) }
+    }
+
+    private fun emit(payload: PulseEventPayload) {
+        // Auto-emit into the host's analytics queue with a "$pulse."
+        // prefix so survey lifecycle shows up in the same dashboard
+        // / warehouse as every other event the host tracks. Listeners
+        // registered through on(...) still fire as well — that path
+        // is for in-process integrations (Slack pings, conditional
+        // UI), not for analytics.
+        val trackProps = buildMap<String, Any> {
+            put("survey_id", payload.surveyId)
+            payload.responseId?.let { put("response_id", it) }
+            payload.reason?.let { put("reason", it) }
+        }
+        runCatching {
+            Sankofa.track("\$pulse.${payload.event.wireName}", trackProps)
+        }.onFailure { Log.d(TAG, "pulse track emit failed: ${it.message}") }
+
+        val bucket = listeners[payload.event] ?: return
+        for (l in bucket) {
+            runCatching { l(payload) }
+                .onFailure { Log.w(TAG, "pulse listener threw: ${it.message}") }
+        }
+    }
+
     // ── Programmatic presentation ────────────────────────────────────
 
     /**
@@ -224,11 +279,13 @@ object SankofaPulse : SankofaPluggableModule {
             val partial = if (externalId.isNotEmpty()) {
                 runCatching { c.loadPartial(surveyId, externalId) }.getOrNull()
             } else null
+            val translator = PulseTranslator.build(bundle.translations)
             postToMain {
                 if (!activity.isFinishing) {
                     present(
                         survey = bundle.survey,
                         branchingRules = bundle.branchingRules,
+                        translator = translator,
                         initialAnswers = partial?.answers ?: emptyMap(),
                         initialQuestionId = partial?.currentQuestionId,
                         activity = activity,
@@ -275,14 +332,48 @@ object SankofaPulse : SankofaPluggableModule {
             surveyId = surveyId,
             respondentExternalId = Sankofa.distinctId().orEmpty(),
             userProperties = properties,
-            flagValues = flags,
+            flagValues = mergeWithSwitchFlags(flags),
         )
         return PulseTargeting.evaluate(rules, ctx)
+    }
+
+    /**
+     * Merge SankofaSwitch flag values into the eligibility context
+     * so feature_flag rules can target without the host re-passing
+     * every flag. Host-supplied [overrides] win over Switch values
+     * by key — that lets a host force a flag for testing without
+     * the runtime Switch decision overriding them.
+     */
+    private fun mergeWithSwitchFlags(overrides: Map<String, Any?>): Map<String, Any?> {
+        // Cheap registry probe: avoids touching SankofaSwitch when
+        // the host didn't link Switch into their build (no-op in
+        // that case, but the explicit guard makes the intent clear).
+        if (!SankofaModuleRegistry.has(SankofaModuleName.SWITCH)) return overrides
+        val merged = LinkedHashMap<String, Any?>()
+        try {
+            for (key in dev.sankofa.sdk.switchmod.SankofaSwitch.getAllKeys()) {
+                val decision = dev.sankofa.sdk.switchmod.SankofaSwitch.getDecision(key)
+                if (decision != null) {
+                    // For variant flags we expose the variant string;
+                    // for boolean flags we expose the bool value. The
+                    // targeting evaluator's jsonEqual handles either.
+                    merged[key] = if (decision.variant.isNotEmpty()) decision.variant
+                    else decision.value
+                }
+            }
+        } catch (e: Throwable) {
+            // Switch hasn't been initialised or threw — fall through
+            // and use only the host overrides.
+            Log.d(TAG, "switch flag merge failed: ${e.message}")
+        }
+        merged.putAll(overrides)
+        return merged
     }
 
     private fun present(
         survey: PulseSurvey,
         branchingRules: List<dev.sankofa.sdk.pulse.branching.PulseBranchingRule> = emptyList(),
+        translator: PulseTranslator? = null,
         initialAnswers: Map<String, Any?> = emptyMap(),
         initialQuestionId: String? = null,
         activity: Activity,
@@ -292,6 +383,7 @@ object SankofaPulse : SankofaPluggableModule {
             context = activity,
             survey = survey,
             branchingRules = branchingRules,
+            translator = translator,
             initialAnswers = initialAnswers,
             initialQuestionId = initialQuestionId,
             onProgress = { answers, currentQuestionId ->
@@ -310,14 +402,24 @@ object SankofaPulse : SankofaPluggableModule {
                 // best-effort client-side delete so dismissed-then-
                 // resumed-in-a-different-session doesn't surface a
                 // stale partial during the brief window.
-                handleSubmit(enrichContext(payload))
+                handleSubmit(enrichContext(payload), surveyId = survey.id)
                 if (externalId.isNotEmpty()) {
                     deletePartialAsync(survey.id, externalId)
                 }
             },
-            onDismiss = { /* keep partial intact for resume */ },
+            onDismiss = {
+                emit(PulseEventPayload(
+                    event = PulseEvent.SURVEY_DISMISSED,
+                    surveyId = survey.id,
+                ))
+                /* keep partial intact for resume */
+            },
         )
         dialog.show()
+        emit(PulseEventPayload(
+            event = PulseEvent.SURVEY_SHOWN,
+            surveyId = survey.id,
+        ))
     }
 
     // ── Partial save scheduler ──────────────────────────────────────
@@ -349,6 +451,10 @@ object SankofaPulse : SankofaPluggableModule {
                     currentQuestionId = currentQuestionId,
                 )
                 c.savePartial(payload)
+                emit(PulseEventPayload(
+                    event = PulseEvent.SURVEY_PARTIAL_SAVED,
+                    surveyId = surveyId,
+                ))
             } catch (_: kotlinx.coroutines.CancellationException) {
                 // Replaced by a newer save — expected.
             } catch (e: Throwable) {
@@ -374,21 +480,33 @@ object SankofaPulse : SankofaPluggableModule {
         osVersion = "Android ${Build.VERSION.RELEASE ?: ""}".trim(),
         appVersion = appVersionString(),
         locale = Locale.getDefault().toString().ifEmpty { null },
+        replaySessionId = Sankofa.replaySessionId(),
     )
 
     // ── Submission ───────────────────────────────────────────────────
 
-    private fun handleSubmit(payload: PulseSubmitPayload) {
+    private fun handleSubmit(payload: PulseSubmitPayload, surveyId: String) {
         val c = client ?: return
         val q = queue
         scope.launch {
             try {
-                c.submit(payload)
+                val resp = c.submit(payload)
+                // Fire SURVEY_COMPLETED with the server-issued response
+                // id so hosts can correlate against dashboard rows.
+                emit(PulseEventPayload(
+                    event = PulseEvent.SURVEY_COMPLETED,
+                    surveyId = surveyId,
+                    responseId = resp.id,
+                ))
                 // Any prior failures? Drain them now while the network
                 // is clearly up.
                 q?.let { drainQueueLocked(it, c) }
             } catch (_: Throwable) {
-                // Network down — persist for next drain.
+                // Network down — persist for next drain. We deliberately
+                // do NOT fire SURVEY_COMPLETED yet; the host's analytics
+                // should treat "submitted to local queue" differently
+                // from "server confirmed". The drain path emits when
+                // the queued payload eventually lands.
                 q?.enqueue(payload)
             }
         }

@@ -67,6 +67,13 @@ internal data class PulseSurveyBundle(
     ),
     val targetingRules: List<dev.sankofa.sdk.pulse.targeting.PulseTargetingRule> = emptyList(),
     val branchingRules: List<dev.sankofa.sdk.pulse.branching.PulseBranchingRule> = emptyList(),
+    /**
+     * Per-locale string overrides, keyed first by BCP-47 locale tag
+     * (e.g. "en-US"), then by the dot-path key (e.g.
+     * "question.psq_q1.prompt"). Empty when the survey hasn't been
+     * translated.
+     */
+    val translations: Map<String, Map<String, String>> = emptyMap(),
 )
 
 /**
@@ -105,12 +112,64 @@ internal data class PulseContext(
     @SerializedName("os_version") val osVersion: String? = null,
     @SerializedName("app_version") val appVersion: String? = null,
     @SerializedName("locale") val locale: String? = null,
+    /**
+     * Session id of the active replay recording, when replay is on.
+     * Lets the dashboard deep-link from a Pulse response straight
+     * to the recorded session that produced it. Null when replay is
+     * disabled, sampled out, or not yet started — distinguishes
+     * "no replay available" from "replay session unknown".
+     */
+    @SerializedName("replay_session_id") val replaySessionId: String? = null,
 )
 
 internal data class PulseSubmitResponse(
     @SerializedName("id") val id: String? = null,
     @SerializedName("survey_id") val surveyId: String? = null,
 )
+
+/**
+ * Lifecycle events the SDK fires while a survey is on screen.
+ * Hosts subscribe via [SankofaPulse.on] to wire Pulse into their
+ * own analytics / CRM / replay tooling.
+ */
+enum class PulseEvent(val wireName: String) {
+    /** Fired right after the survey dialog opens. */
+    SURVEY_SHOWN("survey_shown"),
+    /** Fired when the respondent closes without submitting. */
+    SURVEY_DISMISSED("survey_dismissed"),
+    /** Fired after a successful submission. */
+    SURVEY_COMPLETED("survey_completed"),
+    /** Fired after a successful partial-state save. */
+    SURVEY_PARTIAL_SAVED("survey_partial_saved"),
+}
+
+/**
+ * Payload delivered to every [PulseEventListener]. `responseId` is
+ * only populated on [PulseEvent.SURVEY_COMPLETED]; `reason` is
+ * populated on dismissal when we have one (e.g. eligibility miss).
+ */
+data class PulseEventPayload(
+    val event: PulseEvent,
+    val surveyId: String,
+    val responseId: String? = null,
+    val reason: String? = null,
+)
+
+/** Functional alias matching the Web SDK. */
+typealias PulseEventListener = (PulseEventPayload) -> Unit
+
+/**
+ * Token returned by [SankofaPulse.on]. Hold it to keep the
+ * listener alive; call [cancel] to remove it. Mirrors the shape of
+ * `Cancellation` in [SankofaSwitch] so hosts that already use
+ * Switch don't have a second cancellation idiom to remember.
+ */
+class PulseSubscription internal constructor(private var action: (() -> Unit)?) {
+    fun cancel() {
+        action?.invoke()
+        action = null
+    }
+}
 
 /**
  * Wire payload for `POST /api/pulse/partial`. Same answers shape

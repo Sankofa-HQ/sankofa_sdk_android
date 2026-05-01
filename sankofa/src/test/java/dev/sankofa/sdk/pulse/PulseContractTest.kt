@@ -52,6 +52,77 @@ class PulseContractTest {
         assertStructurallyEqual(golden, parseJson(produced))
     }
 
+    @Test
+    fun pulseSubmitAnonymous_matchesGolden() {
+        // Fully anonymous submission: no userId, no externalId, no
+        // email. This catches regressions where the SDK fabricates
+        // an empty string for missing identity fields rather than
+        // omitting the keys entirely.
+        val golden = readGolden("pulse_submit_anonymous.json")
+        val payload = PulseSubmitPayload(
+            surveyId = "psv_anon_001",
+            respondent = PulseRespondent(),
+            context = PulseContext(
+                sessionId = null,
+                anonymousId = null,
+                platform = "contract-test",
+                osVersion = null,
+                appVersion = null,
+                locale = null,
+            ),
+            answers = linkedMapOf("q1" to "anonymous"),
+        )
+        val produced = gson.toJson(payload)
+        assertStructurallyEqual(golden, parseJson(produced))
+    }
+
+    @Test
+    fun pulseSubmitAllAnswerKinds_matchesGolden() {
+        // Every supported answer value type encoded into a single
+        // payload — string, number, array, bool, nested map. Catches
+        // encoder regressions that only affect a specific kind.
+        val golden = readGolden("pulse_submit_all_answer_kinds.json")
+        val payload = PulseSubmitPayload(
+            surveyId = "psv_kinds_001",
+            respondent = PulseRespondent(externalId = "ext_42"),
+            context = PulseContext(
+                sessionId = null,
+                anonymousId = null,
+                platform = "contract-test",
+                osVersion = null,
+                appVersion = null,
+                locale = null,
+                replaySessionId = "rep_abc",
+            ),
+            answers = linkedMapOf(
+                "short_text" to "hello",
+                "long_text" to "the app feels slow when I open the cart screen",
+                "number" to 42,
+                "rating" to 4,
+                "nps" to 9,
+                "single" to "key_pro",
+                "multi" to listOf("key_a", "key_c"),
+                "boolean" to true,
+                "slider" to 75,
+                "date" to "2026-05-01",
+                "ranking" to listOf("key_b", "key_a", "key_c"),
+                "matrix" to linkedMapOf(
+                    "row_a" to "col_x",
+                    "row_b" to "col_y",
+                ),
+                "consent" to true,
+                "image_choice" to "key_blue",
+                "maxdiff" to linkedMapOf(
+                    "best" to "key_a",
+                    "worst" to "key_c",
+                ),
+                "signature" to "data:image/png;base64,iVBORw0KGgo=",
+            ),
+        )
+        val produced = gson.toJson(payload)
+        assertStructurallyEqual(golden, parseJson(produced))
+    }
+
     // ── helpers ───────────────────────────────────────────────────
 
     private fun readGolden(name: String): Map<String, Any?> {

@@ -94,6 +94,26 @@ internal class PulseClient(
             List::class.java, PulseBranchingRule::class.java).type
         val branchingRules: List<PulseBranchingRule> =
             gson.fromJson(branchingJson, branchingType) ?: emptyList()
+        // Translations: server ships locale → strings map. We
+        // tolerate the field being absent or malformed since most
+        // surveys ship without translations and a parse failure
+        // shouldn't keep the dialog from opening.
+        val translations: Map<String, Map<String, String>> = run {
+            val rawTranslations = raw["translations"]
+            if (rawTranslations !is Map<*, *>) return@run emptyMap()
+            val out = LinkedHashMap<String, Map<String, String>>()
+            for ((rawLocale, rawStrings) in rawTranslations) {
+                val locale = rawLocale?.toString() ?: continue
+                if (rawStrings !is Map<*, *>) continue
+                val stringsMap = LinkedHashMap<String, String>()
+                for ((k, v) in rawStrings) {
+                    if (k == null || v == null) continue
+                    stringsMap[k.toString()] = v.toString()
+                }
+                if (stringsMap.isNotEmpty()) out[locale] = stringsMap
+            }
+            out
+        }
         // The bundle survey row doesn't carry questions on the Go
         // wire — we attach them here so callers see one self-contained
         // PulseSurvey.
@@ -102,6 +122,7 @@ internal class PulseClient(
             survey = merged,
             targetingRules = targetingRules,
             branchingRules = branchingRules,
+            translations = translations,
         )
     }
 

@@ -48,6 +48,14 @@ internal class ReplayUploader(
     private var distinctId: String = "anonymous"
     private var chunkIndex: Int = 0
 
+    /**
+     * Read-only accessor for the active replay session id. Returns
+     * the empty string when configure() hasn't been called yet
+     * (replay sampled out, recordSessions=false, or pre-handshake);
+     * sibling modules treat the empty case as "no recording".
+     */
+    internal fun activeSessionId(): String = sessionId
+
     private val prefs: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 

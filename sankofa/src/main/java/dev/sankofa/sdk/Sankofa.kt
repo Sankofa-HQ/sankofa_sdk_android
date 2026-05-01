@@ -106,6 +106,28 @@ object Sankofa {
         if (::identity.isInitialized) identity.distinctId else null
 
     /**
+     * Session id of the active replay recording, or null when
+     * replay is disabled / sampled out / not yet started.
+     *
+     * Sibling modules (Pulse) stamp this on submitted responses so
+     * the dashboard can deep-link from one row to the recorded
+     * session that produced it. We deliberately return null instead
+     * of an empty string — "no replay" is meaningfully different
+     * from "replay session unknown" and downstream code should be
+     * able to tell.
+     */
+    @JvmStatic fun replaySessionId(): String? {
+        if (!::replayUploader.isInitialized) return null
+        // ReplayUploader.sessionId is empty before configure(...)
+        // is called from onNewSessionStarted, and configure() is
+        // skipped when sampling rolls a miss or recordSessions is
+        // off — so an empty string here is the canonical signal
+        // that "this respondent has no recording".
+        val sid = replayUploader.activeSessionId()
+        return if (sid.isNullOrEmpty()) null else sid
+    }
+
+    /**
      * The current screen name for stateful tagging (Heatmaps, Replays).
      *
      * Empty string is the sentinel for "not yet tagged". The replay

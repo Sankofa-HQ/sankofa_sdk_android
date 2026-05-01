@@ -47,6 +47,7 @@ internal class PulseSurveyDialog(
     context: Context,
     private val survey: PulseSurvey,
     private val branchingRules: List<dev.sankofa.sdk.pulse.branching.PulseBranchingRule> = emptyList(),
+    private val translator: PulseTranslator? = null,
     initialAnswers: Map<String, Any?> = emptyMap(),
     initialQuestionId: String? = null,
     private val onProgress: (answers: Map<String, Any?>, currentQuestionId: String) -> Unit = { _, _ -> },
@@ -96,6 +97,16 @@ internal class PulseSurveyDialog(
         val root = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
+            setBackgroundColor(backgroundColor())
+            // Flip the dialog layout direction when the resolved
+            // translation locale is RTL (Arabic, Hebrew, Persian,
+            // Urdu, …). Android propagates layoutDirection to every
+            // descendant view automatically, so this single set on
+            // the root mirrors the entire dialog without per-view
+            // bookkeeping.
+            if (pulseLocaleIsRTL(translator?.locale)) {
+                layoutDirection = View.LAYOUT_DIRECTION_RTL
+            }
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -112,17 +123,19 @@ internal class PulseSurveyDialog(
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         val title = TextView(ctx).apply {
-            text = survey.name
+            text = translator?.surveyName(survey) ?: survey.name
             textSize = 16f
-            setTextColor(Color.parseColor("#18181B"))
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(foregroundColor())
+            setTypeface(themedTypeface(typeface), android.graphics.Typeface.BOLD)
         }
         titleColumn.addView(title)
-        survey.description?.takeIf { it.isNotBlank() }?.let {
+        (translator?.surveyDescription(survey) ?: survey.description)
+            ?.takeIf { it.isNotBlank() }?.let {
             titleColumn.addView(TextView(ctx).apply {
                 text = it
                 textSize = 12f
-                setTextColor(Color.parseColor("#71717A"))
+                setTextColor(mutedColor())
+                setTypeface(themedTypeface(typeface))
             })
         }
         headerRow.addView(titleColumn)
@@ -131,7 +144,7 @@ internal class PulseSurveyDialog(
             text = "×"
             textSize = 18f
             background = null
-            setTextColor(Color.parseColor("#71717A"))
+            setTextColor(mutedColor())
             setOnClickListener { onDismiss(); dismiss() }
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -145,6 +158,13 @@ internal class PulseSurveyDialog(
             isIndeterminate = false
             max = sortedQuestions.size.coerceAtLeast(1)
             progress = 1
+            // Tint the progress fill with the brand accent. setColorFilter
+            // is the cross-API-level path; progressTintList exists on 21+
+            // but its drawable isn't always wired.
+            progressDrawable?.setColorFilter(
+                accentColor(),
+                android.graphics.PorterDuff.Mode.SRC_IN,
+            )
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(4),
             ).also { it.topMargin = dp(8) }
@@ -166,12 +186,13 @@ internal class PulseSurveyDialog(
         }
         promptText = TextView(ctx).apply {
             textSize = 14f
-            setTextColor(Color.parseColor("#18181B"))
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(foregroundColor())
+            setTypeface(themedTypeface(typeface), android.graphics.Typeface.BOLD)
         }
         helptext = TextView(ctx).apply {
             textSize = 12f
-            setTextColor(Color.parseColor("#71717A"))
+            setTextColor(mutedColor())
+            setTypeface(themedTypeface(typeface))
             visibility = View.GONE
         }
         inputContainer = LinearLayout(ctx).apply {
@@ -189,7 +210,12 @@ internal class PulseSurveyDialog(
 
         errorText = TextView(ctx).apply {
             textSize = 12f
-            setTextColor(Color.parseColor("#DC2626"))
+            // Error red is intentionally NOT theme-resolved — it must
+            // always be unmistakable as an error, not blend with the
+            // brand. WCAG-friendly contrast against either palette.
+            setTextColor(if (isDarkPalette) Color.parseColor("#FCA5A5")
+                else Color.parseColor("#DC2626"))
+            setTypeface(themedTypeface(typeface))
             visibility = View.GONE
         }
         root.addView(errorText)
@@ -228,9 +254,10 @@ internal class PulseSurveyDialog(
 
     private fun renderCurrent() {
         val q = current() ?: return
-        promptText.text = q.prompt
-        helptext.text = q.helptext.orEmpty()
-        helptext.visibility = if (q.helptext.isNullOrBlank()) View.GONE else View.VISIBLE
+        promptText.text = translator?.questionPrompt(q) ?: q.prompt
+        val resolvedHelp = translator?.questionHelptext(q) ?: q.helptext
+        helptext.text = resolvedHelp.orEmpty()
+        helptext.visibility = if (resolvedHelp.isNullOrBlank()) View.GONE else View.VISIBLE
         progressBar.progress = currentIndex + 1
         inputContainer.removeAllViews()
         renderInput(q)
@@ -385,7 +412,14 @@ internal class PulseSurveyDialog(
                 text = if (current >= n) "★" else "☆"
                 textSize = 22f
                 background = null
-                setTextColor(Color.parseColor(if (current >= n) "#F59E0B" else "#A1A1AA"))
+                // The active star always uses the brand accent (the
+                // operator's primary_color); the inactive star fades
+                // into the muted palette so unselected pips visually
+                // recede. We deliberately don't theme the active
+                // colour to the orange star convention — operators
+                // who want stars in their brand colour set
+                // primary_color and get exactly that.
+                setTextColor(if (current >= n) accentColor() else mutedColor())
                 setOnClickListener {
                     answers[q.id] = n
                     inputContainer.removeAllViews()
@@ -404,8 +438,8 @@ internal class PulseSurveyDialog(
             val cell = Button(context).apply {
                 text = n.toString()
                 textSize = 12f
-                setTextColor(if (current == n) Color.WHITE else Color.parseColor("#18181B"))
-                setBackgroundColor(if (current == n) accentColor() else Color.parseColor("#F4F4F5"))
+                setTextColor(if (current == n) Color.WHITE else foregroundColor())
+                setBackgroundColor(if (current == n) accentColor() else mutedBackground())
                 setOnClickListener {
                     answers[q.id] = n
                     inputContainer.removeAllViews()
@@ -422,7 +456,7 @@ internal class PulseSurveyDialog(
         val left = TextView(context).apply {
             text = "Not at all"
             textSize = 11f
-            setTextColor(Color.parseColor("#71717A"))
+            setTextColor(mutedColor())
             layoutParams = LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -430,7 +464,7 @@ internal class PulseSurveyDialog(
             text = "Extremely"
             textSize = 11f
             gravity = Gravity.END
-            setTextColor(Color.parseColor("#71717A"))
+            setTextColor(mutedColor())
             layoutParams = LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -444,7 +478,7 @@ internal class PulseSurveyDialog(
         val current = answers[q.id] as? String
         q.options?.forEach { opt ->
             val rb = RadioButton(context).apply {
-                text = opt.label
+                text = translator?.optionLabel(q, opt) ?: opt.label
                 isChecked = current == opt.key
                 setOnClickListener { answers[q.id] = opt.key }
             }
@@ -458,7 +492,7 @@ internal class PulseSurveyDialog(
         val current = (answers[q.id] as? List<String>)?.toMutableSet() ?: mutableSetOf()
         q.options?.forEach { opt ->
             val cb = CheckBox(context).apply {
-                text = opt.label
+                text = translator?.optionLabel(q, opt) ?: opt.label
                 isChecked = current.contains(opt.key)
                 setOnCheckedChangeListener { _, checked ->
                     if (checked) current.add(opt.key) else current.remove(opt.key)
@@ -494,7 +528,7 @@ internal class PulseSurveyDialog(
         }
         val readout = TextView(context).apply {
             text = current.toString(); textSize = 12f
-            setTextColor(Color.parseColor("#71717A"))
+            setTextColor(mutedColor())
         }
         seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
@@ -549,10 +583,10 @@ internal class PulseSurveyDialog(
             val numLabel = TextView(context).apply {
                 text = "${idx + 1}."
                 setPadding(dp(4), dp(8), dp(8), dp(8))
-                setTextColor(Color.parseColor("#71717A"))
+                setTextColor(mutedColor())
             }
             val label = TextView(context).apply {
-                text = opt.label
+                text = translator?.optionLabel(q, opt) ?: opt.label
                 layoutParams = LinearLayout.LayoutParams(0,
                     ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
@@ -600,7 +634,7 @@ internal class PulseSurveyDialog(
             val rowLabel = TextView(context).apply {
                 text = rl
                 textSize = 12f
-                setTextColor(Color.parseColor("#71717A"))
+                setTextColor(mutedColor())
             }
             inputContainer.addView(rowLabel)
 
@@ -626,7 +660,7 @@ internal class PulseSurveyDialog(
 
     private fun renderConsent(q: PulseQuestion) {
         val cb = CheckBox(context).apply {
-            text = q.helptext ?: "I agree."
+            text = (translator?.questionHelptext(q) ?: q.helptext) ?: "I agree."
             isChecked = answers[q.id] == true
             setOnCheckedChangeListener { _, checked ->
                 answers[q.id] = if (checked) true else null
@@ -653,7 +687,7 @@ internal class PulseSurveyDialog(
         }
         header.addView(TextView(context).apply {
             text = "Best"; textSize = 11f
-            setTextColor(Color.parseColor("#71717A"))
+            setTextColor(mutedColor())
             layoutParams = LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
@@ -664,7 +698,7 @@ internal class PulseSurveyDialog(
         })
         header.addView(TextView(context).apply {
             text = "Worst"; textSize = 11f; gravity = Gravity.END
-            setTextColor(Color.parseColor("#71717A"))
+            setTextColor(mutedColor())
             layoutParams = LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
@@ -687,7 +721,7 @@ internal class PulseSurveyDialog(
                 }
             }
             val label = TextView(context).apply {
-                text = opt.label
+                text = translator?.optionLabel(q, opt) ?: opt.label
                 layoutParams = LinearLayout.LayoutParams(0,
                     ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
@@ -738,7 +772,7 @@ internal class PulseSurveyDialog(
         val tv = TextView(context).apply {
             text = "[Unsupported question kind: ${q.kind}]"
             textSize = 12f
-            setTextColor(Color.parseColor("#71717A"))
+            setTextColor(mutedColor())
         }
         inputContainer.addView(tv)
     }
@@ -750,9 +784,82 @@ internal class PulseSurveyDialog(
             TypedValue.COMPLEX_UNIT_DIP, value.toFloat(),
             context.resources.displayMetrics).toInt()
 
-    private fun accentColor(): Int =
-        runCatching { Color.parseColor(survey.theme?.primaryColor ?: "") }
-            .getOrElse { Color.parseColor("#F43F5E") }
+    // ── Theme resolution ─────────────────────────────────────────
+    //
+    // We honour the seven theme fields on PulseTheme:
+    //   primary_color    → accent (buttons, highlights, ratings)
+    //   background_color → dialog window background
+    //   foreground_color → primary text (title, prompt, answer text)
+    //   muted_color      → secondary text (description, helptext)
+    //   border_color     → input field outlines
+    //   font_family      → Typeface.create() for every text view
+    //   dark_mode        → "auto" / "light" / "dark" — flips the
+    //                      built-in palette when the operator's
+    //                      explicit colors aren't set; respects
+    //                      the system setting on "auto"
+    //
+    // Each resolver falls back to a sensible default if the wire
+    // value is missing or unparseable, so a theme that ships with
+    // only `primary_color` set still renders cleanly.
+
+    private val isDarkPalette: Boolean by lazy {
+        when (survey.theme?.darkMode?.lowercase()) {
+            "dark" -> true
+            "light" -> false
+            else -> {
+                // "auto" or absent — follow the system setting.
+                val mask = context.resources.configuration.uiMode and
+                    android.content.res.Configuration.UI_MODE_NIGHT_MASK
+                mask == android.content.res.Configuration.UI_MODE_NIGHT_YES
+            }
+        }
+    }
+
+    private fun parseHex(hex: String?, fallback: Int): Int {
+        if (hex.isNullOrBlank()) return fallback
+        return runCatching { Color.parseColor(hex) }.getOrElse { fallback }
+    }
+
+    private fun accentColor(): Int = parseHex(
+        survey.theme?.primaryColor,
+        if (isDarkPalette) Color.parseColor("#FB7185")
+        else Color.parseColor("#F43F5E"),
+    )
+
+    private fun backgroundColor(): Int = parseHex(
+        survey.theme?.backgroundColor,
+        if (isDarkPalette) Color.parseColor("#0A0A0A")
+        else Color.parseColor("#FFFFFF"),
+    )
+
+    private fun foregroundColor(): Int = parseHex(
+        survey.theme?.foregroundColor,
+        if (isDarkPalette) Color.parseColor("#FAFAFA")
+        else Color.parseColor("#18181B"),
+    )
+
+    private fun mutedColor(): Int = parseHex(
+        survey.theme?.mutedColor,
+        if (isDarkPalette) Color.parseColor("#A1A1AA")
+        else Color.parseColor("#71717A"),
+    )
+
+    private fun borderColor(): Int = parseHex(
+        survey.theme?.borderColor,
+        if (isDarkPalette) Color.parseColor("#27272A")
+        else Color.parseColor("#E4E4E7"),
+    )
+
+    private fun mutedBackground(): Int =
+        if (isDarkPalette) Color.parseColor("#1F1F23")
+        else Color.parseColor("#F4F4F5")
+
+    private fun themedTypeface(base: android.graphics.Typeface?): android.graphics.Typeface? {
+        val family = survey.theme?.fontFamily?.takeIf { it.isNotBlank() } ?: return base
+        return runCatching {
+            android.graphics.Typeface.create(family, base?.style ?: android.graphics.Typeface.NORMAL)
+        }.getOrNull() ?: base
+    }
 
     private fun simpleWatcher(onChange: (String) -> Unit): android.text.TextWatcher =
         object : android.text.TextWatcher {
