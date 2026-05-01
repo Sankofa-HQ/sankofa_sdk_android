@@ -7,6 +7,7 @@ import dev.sankofa.sdk.data.EventQueueManager
 import dev.sankofa.sdk.data.db.AppDatabase
 import dev.sankofa.sdk.data.db.EventEntity
 import dev.sankofa.sdk.network.SankofaHttpClient
+import dev.sankofa.sdk.network.SankofaResponse
 import dev.sankofa.sdk.util.SankofaLogger
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -57,7 +58,7 @@ class EventQueueManagerTest {
     @Test
     fun `enqueue and flush sends events to http client`() = runTest {
         val httpClient = mockk<SankofaHttpClient>()
-        coEvery { httpClient.sendBatch(any()) } returns true
+        coEvery { httpClient.sendBatch(any()) } returns SankofaResponse(success = true)
         val manager = makeManager(httpClient, scope = this)
 
         manager.enqueue(mapOf("event" to "test_event"))
@@ -71,7 +72,7 @@ class EventQueueManagerTest {
     @Test
     fun `flush does nothing when queue is empty`() = runTest {
         val httpClient = mockk<SankofaHttpClient>()
-        coEvery { httpClient.sendBatch(any()) } returns true
+        coEvery { httpClient.sendBatch(any()) } returns SankofaResponse(success = true)
         val manager = makeManager(httpClient, scope = this)
 
         manager.flush()
@@ -83,7 +84,7 @@ class EventQueueManagerTest {
     @Test
     fun `flush is attempted even on network failure`() = runTest {
         val httpClient = mockk<SankofaHttpClient>()
-        coEvery { httpClient.sendBatch(any()) } returns false
+        coEvery { httpClient.sendBatch(any()) } returns SankofaResponse(success = false)
         val manager = makeManager(httpClient, scope = this)
 
         manager.enqueue(mapOf("event" to "test_event"))
@@ -97,7 +98,7 @@ class EventQueueManagerTest {
     @Test
     fun `flush batches multiple pre-seeded events in one sendBatch call`() = runTest {
         val httpClient = mockk<SankofaHttpClient>()
-        coEvery { httpClient.sendBatch(any()) } returns true
+        coEvery { httpClient.sendBatch(any()) } returns SankofaResponse(success = true)
         val manager = makeManager(httpClient, batchSize = 50, scope = this)
 
         // Seed the DAO directly so we know exactly what's in the queue before flush

@@ -39,6 +39,7 @@ enum class SankofaModuleName(val wireName: String) {
     CATCH("catch"),
     SWITCH("switch"),
     CONFIG("config"),
+    PULSE("pulse"),
 }
 
 /**
@@ -192,6 +193,24 @@ object SankofaModuleRegistry {
                     }
                 } else if (isDebuggable()) {
                     Log.w(TAG, "Server enabled \"config\" but SankofaRemoteConfig is not linked. Call SankofaRemoteConfig.init(context) after Sankofa.init().")
+                }
+            }
+        }
+
+        // Pulse — in-app surveys
+        (modules["pulse"] as? Map<String, Any?>)?.let { pulseCfg ->
+            if (pulseCfg["enabled"] == true) {
+                val mod = synchronized(this) { registered[SankofaModuleName.PULSE] }
+                if (mod != null) {
+                    scope.launch {
+                        try {
+                            mod.applyHandshake(pulseCfg)
+                        } catch (e: Throwable) {
+                            Log.w(TAG, "pulse.applyHandshake failed: ${e.message}")
+                        }
+                    }
+                } else if (isDebuggable()) {
+                    Log.w(TAG, "Server enabled \"pulse\" but SankofaPulse is not linked. Call SankofaPulse.register(context) after Sankofa.init().")
                 }
             }
         }
