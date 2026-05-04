@@ -38,6 +38,7 @@ internal object PulseTargeting {
         ctx: PulseEligibilityContext,
     ): Pair<Boolean, String> = when (rule.kind) {
         PulseRuleKind.URL -> evalUrl(rule, ctx)
+        PulseRuleKind.SCREEN -> evalScreen(rule, ctx)
         PulseRuleKind.EVENT -> evalEvent(rule, ctx)
         PulseRuleKind.USER_PROPERTY -> evalUserProperty(rule, ctx)
         PulseRuleKind.COHORT -> evalCohort(rule, ctx)
@@ -69,6 +70,32 @@ internal object PulseTargeting {
                 if (re.containsMatchIn(url)) true to "" else false to "url does not match regex"
             }
             else -> false to "url_match unknown"
+        }
+    }
+
+    // ── Screen ───────────────────────────────────────────────────────
+
+    private fun evalScreen(
+        rule: PulseTargetingRule,
+        ctx: PulseEligibilityContext,
+    ): Pair<Boolean, String> {
+        val screen = ctx.screenName ?: ""
+        val target = rule.screenName ?: ""
+        if (screen.isEmpty()) return false to "screen unknown"
+        return when (rule.screenMatch) {
+            PulseMatchOp.EQUALS ->
+                if (screen == target) true to "" else false to "screen not equal to target"
+            PulseMatchOp.CONTAINS ->
+                if (screen.contains(target)) true to "" else false to "screen does not contain target"
+            PulseMatchOp.PREFIX ->
+                if (screen.startsWith(target)) true to "" else false to "screen does not start with target"
+            PulseMatchOp.REGEX -> {
+                val re = try { Regex(target) } catch (_: Throwable) {
+                    return false to "screen regex did not compile"
+                }
+                if (re.containsMatchIn(screen)) true to "" else false to "screen does not match regex"
+            }
+            else -> false to "screen_match unknown"
         }
     }
 

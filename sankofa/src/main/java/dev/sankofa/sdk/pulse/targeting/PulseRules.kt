@@ -13,6 +13,7 @@ import com.google.gson.annotations.SerializedName
 /** Closed allowlist of rule kinds. */
 internal object PulseRuleKind {
     const val URL = "url"
+    const val SCREEN = "screen"
     const val EVENT = "event"
     const val USER_PROPERTY = "user_property"
     const val COHORT = "cohort"
@@ -49,6 +50,9 @@ internal data class PulseTargetingRule(
     // url
     @SerializedName("url_match") val urlMatch: String? = null,
     @SerializedName("url_value") val urlValue: String? = null,
+    // screen — same shape as url, applied to native screen names.
+    @SerializedName("screen_match") val screenMatch: String? = null,
+    @SerializedName("screen_name") val screenName: String? = null,
     // event
     @SerializedName("event_name") val eventName: String? = null,
     @SerializedName("event_min_count") val eventMinCount: Int? = null,
@@ -80,6 +84,12 @@ data class PulseEligibilityContext(
     val surveyId: String,
     val respondentExternalId: String,
     val pageUrl: String? = null,
+    /**
+     * Native screen / route name. Sourced from the most-recent
+     * Sankofa.screen() call. Empty before the first screen fires —
+     * KindScreen rules will not match until then.
+     */
+    val screenName: String? = null,
     val recentEvents: Map<String, Int>? = null,
     val userProperties: Map<String, Any?>? = null,
     val cohorts: Map<String, Boolean>? = null,
