@@ -1,12 +1,15 @@
 package dev.sankofa.sdk.pulse
 
 import android.app.Dialog
+import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.net.Uri
 import android.text.InputType
 import android.util.Base64
 import android.util.TypedValue
@@ -240,7 +243,81 @@ internal class PulseSurveyDialog(
         footer.addView(nextButton, LinearLayout.LayoutParams(0,
             ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(footer)
+
+        // Powered-by-Sankofa attribution row. Mirrors the Web SDK +
+        // dashboard preview exactly: same icon (decoded from the
+        // shared base64 brand asset), same label, same link, top
+        // border separating it from the action row. Suppressed only
+        // on white-label tiers in a future iteration.
+        root.addView(buildAttributionRow(ctx))
         return root
+    }
+
+    private fun buildAttributionRow(ctx: Context): View {
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).also { it.topMargin = dp(8) }
+            // Top border drawn programmatically (no XML drawable).
+            val border = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                setStroke(dp(1), borderColor())
+            }
+            // Inset the stroke so only the top edge shows.
+            background = android.graphics.drawable.InsetDrawable(
+                border, 0, 0, 0, -dp(2),
+            )
+        }
+        decodeBrandIcon()?.let { bmp ->
+            val icon = ImageView(ctx).apply {
+                setImageBitmap(bmp)
+                layoutParams = LinearLayout.LayoutParams(dp(12), dp(12)).also {
+                    it.rightMargin = dp(4)
+                }
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+            row.addView(icon)
+        }
+        val label = TextView(ctx).apply {
+            text = SankofaPulseBrand.ATTRIBUTION_LABEL
+            textSize = 10f
+            setTextColor(mutedColor())
+            setTypeface(themedTypeface(typeface), android.graphics.Typeface.BOLD)
+            letterSpacing = 0.02f
+        }
+        row.addView(label)
+        row.isClickable = true
+        row.setOnClickListener {
+            val intent = Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse(SankofaPulseBrand.ATTRIBUTION_URL),
+            )
+            try {
+                ctx.startActivity(intent)
+            } catch (_: ActivityNotFoundException) {
+                // No browser installed — drop silently rather than
+                // crashing the host app on a non-essential link.
+            }
+        }
+        return row
+    }
+
+    private var cachedBrandIcon: android.graphics.Bitmap? = null
+    private fun decodeBrandIcon(): android.graphics.Bitmap? {
+        cachedBrandIcon?.let { return it }
+        return try {
+            val bytes = android.util.Base64.decode(
+                SankofaPulseBrand.ICON_BASE64, android.util.Base64.DEFAULT,
+            )
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                ?.also { cachedBrandIcon = it }
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     private fun bindHeader() {
