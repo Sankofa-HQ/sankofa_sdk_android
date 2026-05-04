@@ -50,9 +50,10 @@ internal data class PulseTargetingRule(
     // url
     @SerializedName("url_match") val urlMatch: String? = null,
     @SerializedName("url_value") val urlValue: String? = null,
-    // screen — same shape as url, applied to native screen names.
+    // screen — same comparator set as url, OR-matched against the
+    // native screen / route name. screenNames is the target set.
     @SerializedName("screen_match") val screenMatch: String? = null,
-    @SerializedName("screen_name") val screenName: String? = null,
+    @SerializedName("screen_names") val screenNames: List<String>? = null,
     // event
     @SerializedName("event_name") val eventName: String? = null,
     @SerializedName("event_min_count") val eventMinCount: Int? = null,

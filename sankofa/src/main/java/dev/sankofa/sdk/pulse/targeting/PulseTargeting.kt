@@ -80,24 +80,25 @@ internal object PulseTargeting {
         ctx: PulseEligibilityContext,
     ): Pair<Boolean, String> {
         val screen = ctx.screenName ?: ""
-        val target = rule.screenName ?: ""
         if (screen.isEmpty()) return false to "screen unknown"
-        return when (rule.screenMatch) {
-            PulseMatchOp.EQUALS ->
-                if (screen == target) true to "" else false to "screen not equal to target"
-            PulseMatchOp.CONTAINS ->
-                if (screen.contains(target)) true to "" else false to "screen does not contain target"
-            PulseMatchOp.PREFIX ->
-                if (screen.startsWith(target)) true to "" else false to "screen does not start with target"
-            PulseMatchOp.REGEX -> {
-                val re = try { Regex(target) } catch (_: Throwable) {
-                    return false to "screen regex did not compile"
-                }
-                if (re.containsMatchIn(screen)) true to "" else false to "screen does not match regex"
-            }
-            else -> false to "screen_match unknown"
+        val targets = (rule.screenNames ?: emptyList()).filter { it.isNotEmpty() }
+        if (targets.isEmpty()) return false to "screen rule has no targets"
+        for (target in targets) {
+            if (matchScreen(screen, target, rule.screenMatch)) return true to ""
         }
+        return false to "screen does not match any target"
     }
+
+    private fun matchScreen(screen: String, target: String, op: String?): Boolean =
+        when (op) {
+            PulseMatchOp.EQUALS -> screen == target
+            PulseMatchOp.CONTAINS -> screen.contains(target)
+            PulseMatchOp.PREFIX -> screen.startsWith(target)
+            PulseMatchOp.REGEX -> {
+                try { Regex(target).containsMatchIn(screen) } catch (_: Throwable) { false }
+            }
+            else -> false
+        }
 
     // ── Event ────────────────────────────────────────────────────────
 
