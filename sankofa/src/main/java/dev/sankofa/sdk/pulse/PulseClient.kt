@@ -1,5 +1,7 @@
 package dev.sankofa.sdk.pulse
 
+import android.content.Context
+import android.content.SharedPreferences
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import dev.sankofa.sdk.pulse.branching.PulseBranchingRule
@@ -27,6 +29,7 @@ import java.util.concurrent.TimeUnit
 internal class PulseClient(
     private val endpoint: String,
     private val apiKey: String,
+    private val appContext: Context? = null,
     private val httpClient: OkHttpClient = defaultClient(),
     private val gson: Gson = Gson(),
 ) {
@@ -34,6 +37,9 @@ internal class PulseClient(
     class HttpException(
         val status: Int, val body: String?,
     ) : RuntimeException("HTTP $status${body?.let { ": $it" } ?: ""}")
+
+    private val prefs: SharedPreferences? =
+        appContext?.getSharedPreferences("sankofa.pulse.cache", Context.MODE_PRIVATE)
 
     fun handshake(): PulseHandshakeResponse {
         val url = "${endpoint.trimEnd('/')}/api/pulse/handshake?installed=pulse"
@@ -52,30 +58,99 @@ internal class PulseClient(
     }
 
     /**
-     * SDK-readable survey list. Returns every published survey the
-     * API key's project owns, with targeting rules attached so the
-     * SDK can run local eligibility evaluation without per-survey
-     * round-trips. Powers `getActiveMatchingSurveys()`. Returns an
-     * empty list on 404 so older engines without this endpoint
-     * don't break the SDK.
+     * SDK-readable survey list, cached in SharedPreferences with
+     * ETag + TTL — reads after the first fetch are instant, and
+     * revalidations short-circuit to a 304 + zero body when the
+     * server hasn't published any changes. Same posture as the
+     * Web / RN / Flutter / iOS SDKs: one full fetch per device per
+     * few minutes, 304 the rest. Returns an empty list on 404 so
+     * older engines without this endpoint don't break the SDK.
      */
-    fun listSurveys(): List<PulseSurveySummary> {
+    @JvmOverloads
+    fun listSurveys(
+        forceRefresh: Boolean = false,
+        ttlMs: Long = DEFAULT_LIST_TTL_MS,
+    ): List<PulseSurveySummary> {
+        val cacheKey = "$SURVEYS_CACHE_PREFIX${endpoint.trimEnd('/')}|$apiKey"
+        val cached = readCache(cacheKey)
+        val now = System.currentTimeMillis()
+        if (!forceRefresh && cached != null && now - cached.fetchedAtMs < ttlMs) {
+            return cached.surveys
+        }
+
         val url = "${endpoint.trimEnd('/')}/api/pulse/surveys"
-        val req = Request.Builder()
+        val builder = Request.Builder()
             .url(url)
             .header("x-api-key", apiKey)
             .header("Accept", "application/json")
             .get()
-            .build()
-        httpClient.newCall(req).execute().use { res ->
-            if (res.code == 404) return emptyList()
-            val body = res.body?.string()
-            if (!res.isSuccessful) throw HttpException(res.code, body)
-            val wrap = gson.fromJson(body, PulseSurveysResponse::class.java)
-                ?: PulseSurveysResponse(null)
-            return wrap.surveys ?: emptyList()
+        if (cached != null && cached.etag.isNotEmpty()) {
+            builder.header("If-None-Match", cached.etag)
+        }
+
+        try {
+            httpClient.newCall(builder.build()).execute().use { res ->
+                if (res.code == 304 && cached != null) {
+                    writeCache(
+                        cacheKey,
+                        cached.copy(fetchedAtMs = now),
+                    )
+                    return cached.surveys
+                }
+                if (res.code == 404) return emptyList()
+                val body = res.body?.string()
+                if (!res.isSuccessful) throw HttpException(res.code, body)
+                val etag = res.header("ETag").orEmpty()
+                val wrap = gson.fromJson(body, PulseSurveysResponse::class.java)
+                    ?: PulseSurveysResponse(null)
+                val surveys = wrap.surveys ?: emptyList()
+                writeCache(
+                    cacheKey,
+                    CachedSurveysList(
+                        etag = etag,
+                        fetchedAtMs = now,
+                        surveys = surveys,
+                    ),
+                )
+                return surveys
+            }
+        } catch (e: Throwable) {
+            // Network failed but we have a stale cache — return it
+            // rather than blocking the host. Better stale surveys
+            // for one tick than a broken modal during a flaky moment.
+            if (cached != null) return cached.surveys
+            throw e
         }
     }
+
+    /** Cache entry persisted to SharedPreferences. Only used when an
+     *  appContext was supplied to the client; otherwise the cache
+     *  helpers are no-ops and every call hits the network. */
+    private data class CachedSurveysList(
+        val etag: String,
+        val fetchedAtMs: Long,
+        val surveys: List<PulseSurveySummary>,
+    )
+
+    private fun readCache(key: String): CachedSurveysList? {
+        val p = prefs ?: return null
+        val raw = p.getString(key, null) ?: return null
+        return try {
+            gson.fromJson(raw, CachedSurveysList::class.java)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun writeCache(key: String, value: CachedSurveysList) {
+        val p = prefs ?: return
+        try {
+            p.edit().putString(key, gson.toJson(value)).apply()
+        } catch (_: Throwable) {
+            /* swallow — fall back to per-call fetch */
+        }
+    }
+
 
     /**
      * Load the full survey bundle (questions + targeting +
@@ -239,6 +314,12 @@ internal class PulseClient(
 
     companion object {
         private val JSON_MEDIA = "application/json".toMediaType()
+        private const val SURVEYS_CACHE_PREFIX = "sankofa.pulse.surveys."
+
+        /** Cache TTL between full revalidations. After this, the
+         *  next listSurveys() call sends a conditional GET; the
+         *  server returns 304 + zero body when nothing has changed. */
+        const val DEFAULT_LIST_TTL_MS: Long = 5 * 60 * 1000
 
         private fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)

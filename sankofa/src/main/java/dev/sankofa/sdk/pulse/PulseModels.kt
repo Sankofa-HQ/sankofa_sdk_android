@@ -68,6 +68,12 @@ internal data class PulseSurveySummary(
     @SerializedName("slug") val slug: String? = null,
     @SerializedName("targeting_rules")
     val targetingRules: List<dev.sankofa.sdk.pulse.targeting.PulseTargetingRule> = emptyList(),
+    /** Dashboard-controlled display behaviour. Defaults match the
+     *  server: auto_show=true, 7-day cooldown, 0ms delay. */
+    @SerializedName("auto_show") val autoShow: Boolean = true,
+    @SerializedName("display_cooldown_seconds")
+    val displayCooldownSeconds: Int = 7 * 24 * 60 * 60,
+    @SerializedName("display_delay_ms") val displayDelayMs: Int = 0,
 )
 
 internal data class PulseSurveysResponse(

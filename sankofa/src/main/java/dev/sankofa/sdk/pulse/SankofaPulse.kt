@@ -101,7 +101,11 @@ object SankofaPulse : SankofaPluggableModule {
                 return false
             }
             this.appContext = context.applicationContext
-            this.client = PulseClient(endpoint = endpoint, apiKey = apiKey)
+            this.client = PulseClient(
+                endpoint = endpoint,
+                apiKey = apiKey,
+                appContext = context.applicationContext,
+            )
             this.queue = PulseQueue(context.applicationContext)
             this.registered = true
         }
