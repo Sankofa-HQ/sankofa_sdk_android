@@ -54,6 +54,27 @@ internal data class PulseHandshakeResponse(
 )
 
 /**
+ * Lightweight projection returned by GET /api/pulse/surveys —
+ * pairs each survey's identity with its targeting rules so the
+ * SDK can run local eligibility evaluation without per-survey
+ * bundle fetches. Mirrors the server's `sdkSurveySummary`.
+ */
+internal data class PulseSurveySummary(
+    @SerializedName("id") val id: String,
+    @SerializedName("name") val name: String,
+    @SerializedName("description") val description: String? = null,
+    @SerializedName("kind") val kind: String,
+    @SerializedName("status") val status: String,
+    @SerializedName("slug") val slug: String? = null,
+    @SerializedName("targeting_rules")
+    val targetingRules: List<dev.sankofa.sdk.pulse.targeting.PulseTargetingRule> = emptyList(),
+)
+
+internal data class PulseSurveysResponse(
+    @SerializedName("surveys") val surveys: List<PulseSurveySummary>?,
+)
+
+/**
  * Full survey bundle — survey row + targeting rules + branching
  * rules. Themes, translations and partial state will land here as
  * those features graduate; the Go-side wire shape includes them

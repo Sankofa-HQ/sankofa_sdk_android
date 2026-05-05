@@ -52,6 +52,32 @@ internal class PulseClient(
     }
 
     /**
+     * SDK-readable survey list. Returns every published survey the
+     * API key's project owns, with targeting rules attached so the
+     * SDK can run local eligibility evaluation without per-survey
+     * round-trips. Powers `getActiveMatchingSurveys()`. Returns an
+     * empty list on 404 so older engines without this endpoint
+     * don't break the SDK.
+     */
+    fun listSurveys(): List<PulseSurveySummary> {
+        val url = "${endpoint.trimEnd('/')}/api/pulse/surveys"
+        val req = Request.Builder()
+            .url(url)
+            .header("x-api-key", apiKey)
+            .header("Accept", "application/json")
+            .get()
+            .build()
+        httpClient.newCall(req).execute().use { res ->
+            if (res.code == 404) return emptyList()
+            val body = res.body?.string()
+            if (!res.isSuccessful) throw HttpException(res.code, body)
+            val wrap = gson.fromJson(body, PulseSurveysResponse::class.java)
+                ?: PulseSurveysResponse(null)
+            return wrap.surveys ?: emptyList()
+        }
+    }
+
+    /**
      * Load the full survey bundle (questions + targeting +
      * branching + theme + translations + partial state) for one
      * survey. The SDK calls this right before presenting so it can

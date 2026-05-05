@@ -58,6 +58,17 @@ object SankofaPulse : SankofaPluggableModule {
     @Volatile private var cachedSurveys: List<PulseSurvey> = emptyList()
 
     /**
+     * Targeting rules keyed by survey id, populated alongside
+     * [cachedSurveys] on each refresh. Lets [activeMatchingSurveys]
+     * run the local eligibility evaluator without fetching a full
+     * bundle for every cached survey.
+     */
+    @Volatile
+    private var cachedTargeting:
+        Map<String, List<dev.sankofa.sdk.pulse.targeting.PulseTargetingRule>> =
+            emptyMap()
+
+    /**
      * Lifecycle event listener registry. Buckets are per-event so an
      * `onCompleted` subscriber doesn't run for `dismissed` events.
      * `CopyOnWriteArrayList` over a synchronized list because emit
@@ -153,18 +164,31 @@ object SankofaPulse : SankofaPluggableModule {
      * the main thread.
      */
     @JvmStatic
-    fun activeMatchingSurveys(callback: (List<PulseSurvey>) -> Unit) {
+    @JvmOverloads
+    fun activeMatchingSurveys(
+        properties: Map<String, Any?> = emptyMap(),
+        flags: Map<String, Any?> = emptyMap(),
+        callback: (List<PulseSurvey>) -> Unit,
+    ) {
+        val deliver = { list: List<PulseSurvey> ->
+            val rulesById = cachedTargeting
+            val out = list.filter { s ->
+                val rules = rulesById[s.id] ?: emptyList()
+                if (rules.isEmpty()) return@filter true
+                evaluateLocally(s.id, rules, properties, flags).eligible
+            }
+            postToMain { callback(out) }
+        }
         val current = cachedSurveys
         if (current.isNotEmpty() || refreshJob == null) {
-            postToMain { callback(current) }
+            deliver(current)
             return
         }
         scope.launch {
             // Wait for any in-flight refresh to settle so the caller
             // doesn't get an empty list when one is about to land.
             refreshJob?.join()
-            val list = cachedSurveys
-            postToMain { callback(list) }
+            deliver(cachedSurveys)
         }
     }
 
@@ -531,14 +555,36 @@ object SankofaPulse : SankofaPluggableModule {
         refreshJob?.cancel()
         refreshJob = scope.launch {
             try {
-                val resp = c.handshake()
-                cachedSurveys = resp.surveys
+                // Prefer the SDK-readable list endpoint — gives us
+                // each survey's targeting rules so the local
+                // eligibility evaluator can run without an extra
+                // bundle round-trip per survey. Fall back to the
+                // legacy /handshake endpoint when the new one
+                // returns empty (older engines).
+                val summaries = c.listSurveys()
+                if (summaries.isNotEmpty()) {
+                    cachedSurveys = summaries.map { s ->
+                        PulseSurvey(
+                            id = s.id,
+                            kind = s.kind,
+                            name = s.name,
+                            description = s.description,
+                        )
+                    }
+                    cachedTargeting = summaries.associate {
+                        it.id to it.targetingRules
+                    }
+                } else {
+                    val resp = c.handshake()
+                    cachedSurveys = resp.surveys
+                    cachedTargeting = emptyMap()
+                }
                 queue?.let { drainQueueLocked(it, c) }
             } catch (e: Throwable) {
-                // First-launch handshake failures are common (offline,
+                // First-launch refresh failures are common (offline,
                 // proxy, captive portal) — log at debug, retry on the
                 // next tick.
-                Log.d(TAG, "handshake failed: ${e.message}")
+                Log.d(TAG, "survey refresh failed: ${e.message}")
             }
         }
     }
