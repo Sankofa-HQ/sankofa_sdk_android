@@ -65,6 +65,26 @@ internal class ReplayRecorder(
     private var lastTapX = -9999
     private var lastTapY = -9999
 
+    // ── Move-event rate limiting ─────────────────────────────────────────
+    // ACTION_MOVE fires up to ~120 times/sec on high-refresh Android panels.
+    // Without throttling, a single 5-second swipe produces 600+ rows, inflating
+    // gesture counts and distorting the swipe heatmap layer.  These constants
+    // are kept in lock-step with iOS (SankofaTouchInterceptor.swift) and the
+    // web SDK so per-platform heatmaps look comparable side-by-side.
+    private val moveThrottleMs = 50L                  // ≈20 samples/sec
+    private val moveCoalescePx = 4                    // drop sub-pixel jitter
+    private var lastMoveAt = 0L
+    private var lastMoveX = -9999
+    private var lastMoveY = -9999
+
+    // ── Pinch detection (two-finger gesture) ─────────────────────────────
+    // When two pointers are active simultaneously we emit a single event per
+    // throttle window with type = 7 (rrweb Pinch/Zoom) at the midpoint.  The
+    // dashboard's "Pinch" filter renders these as a separate layer.  We
+    // cap the rate the same as moves to avoid spamming the queue while the
+    // user holds a two-finger gesture.
+    private var lastPinchAt = 0L
+
     fun startRecording(activity: Activity) {
         stopRecording() // detach from any previous activity first
 
@@ -87,37 +107,87 @@ internal class ReplayRecorder(
         decor.viewTreeObserver.addOnDrawListener(listener)
         drawListener = listener
 
-        // Intercept Touch Events for Session Replay 'Fake Cursor'
+        // Intercept Touch Events for Session Replay 'Fake Cursor'.
+        //
+        // We mirror iOS / Web exactly:
+        //   ACTION_DOWN  → type 1 (MouseDown)        — always recorded
+        //   ACTION_UP    → type 0 (MouseUp)          — always recorded
+        //   ACTION_MOVE  → type 6 (TouchMove)        — throttled + coalesced
+        //   2 pointers   → type 7 (Pinch midpoint)   — throttled, replaces MOVE
+        //   2x DOWN <350ms within 25px → type 4 (DblClick) — synthetic
         val existingCallback = activity.window.callback
         originalWindowCallback = existingCallback
         activity.window.callback = object : android.view.Window.Callback by existingCallback {
             override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
-                if (event.action == android.view.MotionEvent.ACTION_DOWN || event.action == android.view.MotionEvent.ACTION_UP) {
-                    val actionType = if (event.action == android.view.MotionEvent.ACTION_DOWN) 1 else 0
+                val masked = event.actionMasked
+                val isDown = masked == android.view.MotionEvent.ACTION_DOWN
+                val isUp = masked == android.view.MotionEvent.ACTION_UP
+                val isMove = masked == android.view.MotionEvent.ACTION_MOVE
+                if (!isDown && !isUp && !isMove) {
+                    return existingCallback.dispatchTouchEvent(event)
+                }
 
-                    // 🚀 Infinite Scroll Support: Find active scroll offset
-                    var scrollOffsetY = 0
-                    findActiveScrollView(decor)?.let {
-                        scrollOffsetY = it.scrollY
-                    }
+                // 🚦 Skip touch events while the screen is untagged.
+                // RN/Flutter apps tag screens from JS/Dart on mount, and the
+                // first few user interactions during cold-start would
+                // otherwise be attributed to whatever activity class name
+                // was used as the host (or to nothing).  Better to lose a
+                // couple of cold-start taps than to pollute the heatmap
+                // with an "unknown" screen bucket the dashboard can't match.
+                val screen = dev.sankofa.sdk.Sankofa.getCurrentScreenName()
+                if (screen.isEmpty()) {
+                    return existingCallback.dispatchTouchEvent(event)
+                }
 
-                    val absY = event.y.toInt() + scrollOffsetY
-                    val screen = dev.sankofa.sdk.Sankofa.getCurrentScreenName()
-                    // 🚦 Skip touch events while the screen is untagged.
-                    // RN/Flutter apps tag screens from JS/Dart on mount,
-                    // and the first few user interactions during cold-start
-                    // would otherwise be attributed to whatever activity
-                    // class name was used as the host (or to nothing).
-                    // Better to lose a couple of cold-start taps than to
-                    // pollute the heatmap with an "unknown" screen bucket
-                    // the dashboard cannot match.
-                    if (screen.isEmpty()) {
+                // 🚀 Infinite Scroll Support — sampled once per dispatch.
+                // Compose hosts can register a scroll container via
+                // Sankofa.tagScrollContainer(...) which takes precedence
+                // over the classic-View walk.
+                val scrollOffsetY = currentScrollOffsetY(decor)
+
+                val now = System.currentTimeMillis()
+
+                // ── Pinch / two-finger gesture ────────────────────────────
+                // ACTION_MOVE with two pointers down → emit a single event
+                // per throttle window at the midpoint between the two
+                // pointers.  Skips the regular MOVE branch so a pinch never
+                // double-records as both swipe + pinch.
+                if (isMove && event.pointerCount >= 2) {
+                    if (now - lastPinchAt < moveThrottleMs) {
                         return existingCallback.dispatchTouchEvent(event)
                     }
-                    val now = System.currentTimeMillis()
-                    val ex = event.x.toInt()
-                    val ey = event.y.toInt()
+                    lastPinchAt = now
+                    val midX = ((event.getX(0) + event.getX(1)) / 2f).toInt()
+                    val midY = ((event.getY(0) + event.getY(1)) / 2f).toInt()
+                    uploader.enqueueTouchEvent(
+                        x = midX,
+                        y = midY,
+                        absoluteY = midY + scrollOffsetY,
+                        scrollOffsetY = scrollOffsetY,
+                        screen = screen,
+                        timestamp = now,
+                        type = 7 // rrweb Pinch
+                    )
+                    return existingCallback.dispatchTouchEvent(event)
+                }
 
+                val ex = event.x.toInt()
+                val ey = event.y.toInt()
+                val absY = ey + scrollOffsetY
+
+                // ── ACTION_MOVE — throttle + coalesce ─────────────────────
+                if (isMove) {
+                    if (now - lastMoveAt < moveThrottleMs) {
+                        return existingCallback.dispatchTouchEvent(event)
+                    }
+                    val dxm = ex - lastMoveX
+                    val dym = ey - lastMoveY
+                    if (dxm * dxm + dym * dym < moveCoalescePx * moveCoalescePx) {
+                        return existingCallback.dispatchTouchEvent(event)
+                    }
+                    lastMoveAt = now
+                    lastMoveX = ex
+                    lastMoveY = ey
                     uploader.enqueueTouchEvent(
                         x = ex,
                         y = ey,
@@ -125,41 +195,61 @@ internal class ReplayRecorder(
                         scrollOffsetY = scrollOffsetY,
                         screen = screen,
                         timestamp = now,
-                        type = actionType
+                        type = 6 // rrweb TouchMove
                     )
+                    return existingCallback.dispatchTouchEvent(event)
+                }
 
-                    // ── Double-tap recognition (ACTION_DOWN only) ──────────
-                    if (event.action == android.view.MotionEvent.ACTION_DOWN) {
-                        val dt = now - lastTapAt
-                        val dx = ex - lastTapX
-                        val dy = ey - lastTapY
-                        val isDouble =
-                            lastTapAt > 0 &&
-                            dt < doubleTapIntervalMs &&
-                            dx * dx + dy * dy <
-                                doubleTapRadiusPx * doubleTapRadiusPx
+                // ── ACTION_DOWN / ACTION_UP ───────────────────────────────
+                val actionType = if (isDown) 1 else 0
+                uploader.enqueueTouchEvent(
+                    x = ex,
+                    y = ey,
+                    absoluteY = absY,
+                    scrollOffsetY = scrollOffsetY,
+                    screen = screen,
+                    timestamp = now,
+                    type = actionType
+                )
 
-                        if (isDouble) {
-                            uploader.enqueueTouchEvent(
-                                x = ex,
-                                y = ey,
-                                absoluteY = absY,
-                                scrollOffsetY = scrollOffsetY,
-                                screen = screen,
-                                timestamp = now,
-                                type = 4 // rrweb dblclick
-                            )
-                            // Reset so a third tap doesn't fire another double.
-                            lastTapAt = 0L
-                            lastTapX = -9999
-                            lastTapY = -9999
-                        } else {
-                            lastTapAt = now
-                            lastTapX = ex
-                            lastTapY = ey
-                        }
+                if (isDown) {
+                    // A new touch sequence resets the move tracker so the
+                    // first move sample after the down is always recorded.
+                    lastMoveAt = 0L
+                    lastMoveX = -9999
+                    lastMoveY = -9999
+
+                    // Double-tap recognition (ACTION_DOWN only).
+                    val dt = now - lastTapAt
+                    val dx = ex - lastTapX
+                    val dy = ey - lastTapY
+                    val isDouble =
+                        lastTapAt > 0 &&
+                        dt < doubleTapIntervalMs &&
+                        dx * dx + dy * dy <
+                            doubleTapRadiusPx * doubleTapRadiusPx
+
+                    if (isDouble) {
+                        uploader.enqueueTouchEvent(
+                            x = ex,
+                            y = ey,
+                            absoluteY = absY,
+                            scrollOffsetY = scrollOffsetY,
+                            screen = screen,
+                            timestamp = now,
+                            type = 4 // rrweb dblclick
+                        )
+                        // Reset so a third tap doesn't fire another double.
+                        lastTapAt = 0L
+                        lastTapX = -9999
+                        lastTapY = -9999
+                    } else {
+                        lastTapAt = now
+                        lastTapX = ex
+                        lastTapY = ey
                     }
                 }
+
                 return existingCallback.dispatchTouchEvent(event)
             }
         }
@@ -169,7 +259,7 @@ internal class ReplayRecorder(
 
     private fun findActiveScrollView(view: View): View? {
         val name = view.javaClass.name
-        if (view is android.widget.ScrollView || view is android.widget.AbsListView || 
+        if (view is android.widget.ScrollView || view is android.widget.AbsListView ||
             name.contains("RecyclerView") || name.contains("ScrollView") || name.contains("WebView")) {
             if (view.isShown) return view
         }
@@ -179,6 +269,23 @@ internal class ReplayRecorder(
             }
         }
         return null
+    }
+
+    /**
+     * Single source of truth for the active scroll offset used by both
+     * touch attribution and the periodic frame capture.  Compose hosts
+     * register providers via [Sankofa.tagScrollContainer]; classic-View
+     * apps fall back to the existing `findActiveScrollView` walk.
+     *
+     * Compose wins when present because `AndroidComposeView` itself never
+     * exposes the inner scroll position — without an explicit provider,
+     * every Compose-only screen reports 0 and stacks all clicks at the
+     * top of the panorama.
+     */
+    internal fun currentScrollOffsetY(decor: View): Int {
+        val composeOffset = dev.sankofa.sdk.Sankofa.resolveComposeScrollOffsetY()
+        if (composeOffset > 0) return composeOffset
+        return findActiveScrollView(decor)?.scrollY ?: 0
     }
 
     fun stopRecording() {
@@ -269,9 +376,12 @@ internal class ReplayRecorder(
             emptyList()
         }
 
-        // 🚀 Capture scroll + screen metadata in the same UI tick.
-        var scrollOffsetY = 0
-        findActiveScrollView(decor)?.let { scrollOffsetY = it.scrollY }
+        // 🚀 Capture scroll + screen metadata in the same UI tick.  Goes
+        // through `currentScrollOffsetY` so Compose hosts that registered
+        // a provider via `Sankofa.tagScrollContainer` win over the
+        // classic-View walk — without that the panorama keeps capturing
+        // scroll_y = 0 on every frame for Compose-only screens.
+        val scrollOffsetY = currentScrollOffsetY(decor)
         val screen = dev.sankofa.sdk.Sankofa.getCurrentScreenName()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

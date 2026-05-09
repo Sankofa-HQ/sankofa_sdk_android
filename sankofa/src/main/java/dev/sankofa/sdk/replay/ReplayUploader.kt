@@ -92,16 +92,28 @@ internal class ReplayUploader(
 
     /** Called from [ReplayRecorder] when a user touches the screen. */
     fun enqueueTouchEvent(
-        x: Int, 
-        y: Int, 
-        absoluteY: Int, 
-        scrollOffsetY: Int, 
-        screen: String, 
-        timestamp: Long, 
+        x: Int,
+        y: Int,
+        absoluteY: Int,
+        scrollOffsetY: Int,
+        screen: String,
+        timestamp: Long,
         type: Int
     ) {
         if (sessionId.isEmpty()) return
-        // Formatted to loosely mirror the rrweb type: 3 MouseInteraction payload
+        // Formatted to loosely mirror the rrweb type: 3 MouseInteraction payload.
+        //
+        // `screen` is intentionally a TOP-LEVEL field on the event (not on
+        // `data`).  The replay worker reads `event.screen` for high-precision
+        // attribution when a chunk spans a screen change — putting it on
+        // `data` makes the worker fall back to `frames[0].screen` and
+        // attribute every later tap to the first frame's screen.  iOS/Web
+        // both place `screen` at the event level; we mirror that.
+        //
+        // `scroll_y` was previously emitted on `data` but the worker has its
+        // own scroll-aware normalization (absoluteY / screenH) and never
+        // reads `data.scroll_y`.  Dropped from the wire shape to keep the
+        // payload tight.
         touchEventsBuffer.add(
             mapOf(
                 "type" to 3,
@@ -110,11 +122,10 @@ internal class ReplayUploader(
                     "type" to type, // 1 = MouseDown, 0 = MouseUp, etc.
                     "id" to 1,
                     "x" to x,
-                    "y" to absoluteY,
-                    "scroll_y" to scrollOffsetY,
-                    "screen" to screen
+                    "y" to absoluteY
                 ),
-                "timestamp" to timestamp
+                "timestamp" to timestamp,
+                "screen" to screen
             )
         )
     }

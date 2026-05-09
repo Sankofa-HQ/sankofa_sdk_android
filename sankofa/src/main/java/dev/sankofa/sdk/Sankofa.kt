@@ -137,6 +137,93 @@ object Sankofa {
     private var currentScreen: String = ""
     private var isManualScreen: Boolean = false
 
+    // ── Compose / custom-scrollable scroll-offset providers ──────────────
+    //
+    // Classic-View (`ScrollView` / `RecyclerView` / `AbsListView`) scroll
+    // positions are walked from the decor view's hierarchy by the replay
+    // recorder.  Compose hosts (`LazyColumn`, `Modifier.verticalScroll`,
+    // `Modifier.scrollable`) draw into a single `AndroidComposeView` with
+    // no per-scrollable child View, so that walk returns 0 and every tap
+    // collapses to the first viewport in the heatmap panorama.
+    //
+    // The host registers a callback returning the active scroll offset in
+    // pixels (UI-thread safe is the host's responsibility — typical use
+    // is `{ scrollState.value }` for `Modifier.verticalScroll` or
+    // `{ lazyListState.firstVisibleItemIndex * itemHeight + lazyListState.firstVisibleItemScrollOffset }`
+    // for `LazyColumn`).  The most-recently-registered provider wins, so
+    // navigating screens and registering a new one transparently swaps
+    // out the previous source — typical pattern is `DisposableEffect` in
+    // a Composable that calls `tagScrollContainer` on enter and clears
+    // it on dispose.
+    //
+    // Multiple registrations are allowed (e.g. nested scrollables).  The
+    // provider list is iterated in registration order and the first
+    // non-zero result wins, matching the "first scrollable wins" semantics
+    // of the classic-View walker for parity.
+    @Volatile
+    private var scrollOffsetProviders: List<() -> Int> = emptyList()
+
+    /**
+     * Register a callback that returns the current scroll offset (in pixels)
+     * of a Compose or custom scrollable container.  Use this from a
+     * `Composable` whose state you want included in heatmap accuracy:
+     *
+     * ```kotlin
+     * @Composable
+     * fun ProductList() {
+     *     val scrollState = rememberScrollState()
+     *     DisposableEffect(scrollState) {
+     *         val handle = Sankofa.tagScrollContainer { scrollState.value }
+     *         onDispose { handle.remove() }
+     *     }
+     *     Column(modifier = Modifier.verticalScroll(scrollState)) { ... }
+     * }
+     * ```
+     *
+     * For `LazyColumn`/`LazyRow`, derive the pixel offset from the list
+     * state (`firstVisibleItemIndex * estimatedItemHeight + firstVisibleItemScrollOffset`)
+     * if you need accuracy below the first fold — Compose's lazy lists
+     * don't expose a true content-pixel offset for variable-height items.
+     *
+     * Returns a [ScrollContainerHandle] — call [ScrollContainerHandle.remove]
+     * when the scrollable leaves composition.  Handles are idempotent;
+     * removing twice is a no-op.
+     */
+    @JvmStatic
+    fun tagScrollContainer(provider: () -> Int): ScrollContainerHandle {
+        synchronized(this) {
+            scrollOffsetProviders = scrollOffsetProviders + provider
+        }
+        return ScrollContainerHandle {
+            synchronized(this) {
+                scrollOffsetProviders = scrollOffsetProviders.filterNot { it === provider }
+            }
+        }
+    }
+
+    /**
+     * Internal helper used by [ReplayRecorder] to resolve the active
+     * scroll offset.  Compose providers (registered via
+     * [tagScrollContainer]) take precedence over the classic-View walk —
+     * the recorder calls this directly and falls back to its own
+     * `findActiveScrollView` only when no provider returns a non-zero
+     * value.
+     */
+    internal fun resolveComposeScrollOffsetY(): Int {
+        val snapshot = scrollOffsetProviders
+        for (provider in snapshot) {
+            val value = try {
+                provider.invoke()
+            } catch (_: Throwable) {
+                // Defensive: a host callback that throws shouldn't crash
+                // the touch dispatcher.  Just skip and try the next.
+                continue
+            }
+            if (value > 0) return value
+        }
+        return 0
+    }
+
     internal fun getCurrentScreenName(): String = currentScreen
 
     /**
