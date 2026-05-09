@@ -92,6 +92,16 @@ object SankofaModuleRegistry {
     fun has(name: SankofaModuleName): Boolean = registered.containsKey(name)
 
     /**
+     * Cross-module introspection. Returns the registered module
+     * (concrete subtype erased to [SankofaPluggableModule]) or null
+     * when the module isn't linked. Used by Catch to auto-discover
+     * Switch + RemoteConfig snapshots without forcing the host to
+     * pass closures into [SankofaCatch.init].
+     */
+    @Synchronized
+    fun get(name: SankofaModuleName): SankofaPluggableModule? = registered[name]
+
+    /**
      * Returns the list of module names the app binary ships with.
      * Analytics is always present (it IS the core). Sent to the server
      * in the Reverse Handshake.

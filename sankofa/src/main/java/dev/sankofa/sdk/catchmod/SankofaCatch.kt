@@ -164,6 +164,24 @@ object SankofaCatch : SankofaPluggableModule {
     @JvmStatic
     fun addBreadcrumb(crumb: CatchBreadcrumb) = breadcrumbs.push(crumb)
 
+    /**
+     * Crashlytics-style breadcrumb log. Drops a free-text trail entry
+     * onto the ring buffer that rides on the next captured event.
+     * Doesn't bill: no event is emitted unless something else captures.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun log(message: String, category: String? = null) {
+        breadcrumbs.push(
+            CatchBreadcrumb(
+                type = "log",
+                category = category ?: "log",
+                message = message,
+                level = CatchLevel.INFO,
+            )
+        )
+    }
+
     @JvmStatic
     fun setUser(u: CatchUserContext?) {
         synchronized(stateLock) { user = u }
@@ -174,6 +192,12 @@ object SankofaCatch : SankofaPluggableModule {
         synchronized(stateLock) { this.tags.putAll(tags) }
     }
 
+    /** Single-key convenience over [setTags]. */
+    @JvmStatic
+    fun setTag(key: String, value: String) {
+        synchronized(stateLock) { this.tags[key] = value }
+    }
+
     @JvmStatic
     fun setExtra(key: String, value: Any?) {
         synchronized(stateLock) { this.extra[key] = value }
@@ -181,6 +205,17 @@ object SankofaCatch : SankofaPluggableModule {
 
     @JvmStatic
     fun flush() = flushInternal()
+
+    /**
+     * True once [init] has been called at least once. Static helpers on
+     * the parent [Sankofa] object check this so they can degrade to a
+     * no-op when the host disabled Catch via `enableCatch = false` —
+     * keeps `Sankofa.captureException(e)` safe to call from anywhere
+     * without a guard.
+     */
+    @JvmStatic
+    val isStarted: Boolean
+        get() = prefs != null
 
     // ── Capture path ───────────────────────────────────────────
 
@@ -228,8 +263,8 @@ object SankofaCatch : SankofaPluggableModule {
             release = releaseName,
             breadcrumbs = breadcrumbs.snapshot(),
             fingerprint = options.fingerprint,
-            flagSnapshot = readFlagSnapshot?.invoke(),
-            configSnapshot = readConfigSnapshot?.invoke(),
+            flagSnapshot = readFlagSnapshot?.invoke() ?: autoFlagSnapshot(),
+            configSnapshot = readConfigSnapshot?.invoke() ?: autoConfigSnapshot(),
             traceId = options.traceId,
             spanId = options.spanId,
             debugMeta = CatchDebugMetaCapture.capture(),
@@ -274,14 +309,56 @@ object SankofaCatch : SankofaPluggableModule {
             device = buildDeviceContext(),
             release = releaseName,
             breadcrumbs = breadcrumbs.snapshot(),
-            flagSnapshot = readFlagSnapshot?.invoke(),
-            configSnapshot = readConfigSnapshot?.invoke(),
+            flagSnapshot = readFlagSnapshot?.invoke() ?: autoFlagSnapshot(),
+            configSnapshot = readConfigSnapshot?.invoke() ?: autoConfigSnapshot(),
             debugMeta = CatchDebugMetaCapture.capture(),
         )
         buffer.add(event)
         persistToStorage()
         if (buffer.size >= BATCH_SIZE) flushInternal()
         return event.eventId
+    }
+
+    /**
+     * Best-effort flag snapshot. Used when the host didn't pass an
+     * explicit `readFlagSnapshot` to [init]. Looks the Switch module
+     * up via the registry — if Switch isn't linked, returns null and
+     * the event ships without a flag snapshot.
+     *
+     * The cast through [SankofaPluggableModule] keeps this file from
+     * pulling Switch's concrete API into the catch module's ABI. The
+     * registry is the only contract.
+     */
+    private fun autoFlagSnapshot(): Map<String, String>? {
+        val mod = SankofaModuleRegistry.get(SankofaModuleName.SWITCH)
+            ?: return null
+        if (mod !is dev.sankofa.sdk.switchmod.SankofaSwitch) return null
+        val keys = mod.getAllKeys()
+        if (keys.isEmpty()) return null
+        val out = HashMap<String, String>(keys.size)
+        for (k in keys) {
+            val d = mod.getDecision(k) ?: continue
+            // Variants render as the variant key; pure boolean flags
+            // render as "true"/"false" so the dashboard can group on
+            // the value without re-resolving.
+            out[k] = if (d.variant.isNotEmpty()) d.variant else d.value.toString()
+        }
+        return out.takeIf { it.isNotEmpty() }
+    }
+
+    /** Symmetric to [autoFlagSnapshot] but for the RemoteConfig module. */
+    private fun autoConfigSnapshot(): Map<String, Any?>? {
+        val mod = SankofaModuleRegistry.get(SankofaModuleName.CONFIG)
+            ?: return null
+        if (mod !is dev.sankofa.sdk.remoteconfig.SankofaRemoteConfig) return null
+        val keys = mod.getAllKeys()
+        if (keys.isEmpty()) return null
+        val out = HashMap<String, Any?>(keys.size)
+        for (k in keys) {
+            val d = mod.getDecision(k) ?: continue
+            out[k] = d.value
+        }
+        return out.takeIf { it.isNotEmpty() }
     }
 
     private fun mergedTags(options: CatchCaptureOptions): Map<String, String>? {
@@ -412,8 +489,8 @@ object SankofaCatch : SankofaPluggableModule {
                     release = releaseName,
                     breadcrumbs = breadcrumbs.snapshot(),
                     tags = tags.ifEmpty { null },
-                    flagSnapshot = readFlagSnapshot?.invoke(),
-                    configSnapshot = readConfigSnapshot?.invoke(),
+                    flagSnapshot = readFlagSnapshot?.invoke() ?: autoFlagSnapshot(),
+                    configSnapshot = readConfigSnapshot?.invoke() ?: autoConfigSnapshot(),
                     debugMeta = CatchDebugMetaCapture.capture(),
                 )
                 buffer.addFirst(event)

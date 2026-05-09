@@ -40,4 +40,27 @@ data class SankofaConfig(
 
     /** Upload a batch when this many events have accumulated in the local DB. */
     val batchSize: Int = 50,
+
+    // ── Catch (error + crash + ANR reporting) ─────────────────────────
+    //
+    // Crashlytics + Sentry merged: when [enableCatch] is true, [Sankofa.init]
+    // installs the chained `Thread.setDefaultUncaughtExceptionHandler`, the
+    // ANR watcher, and the persistent retry queue automatically — host
+    // code does NOT need a separate `SankofaCatch.init(...)` call.
+
+    /**
+     * Auto-start [dev.sankofa.sdk.catchmod.SankofaCatch] inside [Sankofa.init].
+     * Defaults to true. Set to false only if you need to defer Catch
+     * boot (e.g. integration tests that spy on the global handler).
+     */
+    val enableCatch: Boolean = true,
+
+    /** Catch environment tag — "live", "staging", "dev", custom. */
+    val catchEnvironment: String = "live",
+
+    /** Optional release identifier (e.g. "myapp@1.4.0+42") sent on every Catch event. */
+    val release: String? = null,
+
+    /** Optional app version string sent in the Catch device context. */
+    val appVersion: String? = null,
 )

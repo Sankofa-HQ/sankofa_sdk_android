@@ -2,6 +2,10 @@ package dev.sankofa.sdk
 
 import android.content.Context
 import com.google.gson.Gson
+import dev.sankofa.sdk.catchmod.CatchBreadcrumb
+import dev.sankofa.sdk.catchmod.CatchCaptureOptions
+import dev.sankofa.sdk.catchmod.CatchUserContext
+import dev.sankofa.sdk.catchmod.SankofaCatch
 import dev.sankofa.sdk.core.SankofaDeviceInfo
 import dev.sankofa.sdk.core.SankofaIdentity
 import dev.sankofa.sdk.core.SankofaLifecycleObserver
@@ -407,6 +411,20 @@ object Sankofa {
         // Collect static device properties once
         defaultProperties = SankofaDeviceInfo.getProperties(appContext)
 
+        // ── Catch (Crashlytics + Sentry merged) ──────────────────────
+        // Auto-install the uncaught-exception handler + ANR watcher so
+        // host code doesn't need a separate `SankofaCatch.init(...)`.
+        // Skipped when the host opts out via `config.enableCatch = false`
+        // or has already wired Catch by hand (test harnesses, hot reload).
+        if (config.enableCatch && !SankofaCatch.isStarted) {
+            SankofaCatch.init(
+                context = appContext,
+                environment = config.catchEnvironment,
+                release = config.release,
+                appVersion = config.appVersion,
+            )
+        }
+
         // Boot up
         scope.launch {
             sessionManager.refresh()
@@ -573,6 +591,102 @@ object Sankofa {
     fun flush() {
         assertInitialized("flush") ?: return
         scope.launch { queueManager.flush() }
+    }
+
+    // ── Catch static helpers (Crashlytics + Sentry merged) ──────────
+    //
+    // Surface area pinned for parity with the Flutter / RN / iOS SDKs.
+    // Each helper degrades to a no-op when Catch hasn't booted yet
+    // (e.g. host disabled it via `enableCatch = false`) so call sites
+    // never need to guard `if (catchEnabled) ...`.
+
+    /**
+     * Capture a handled exception. Returns the event ID, or `""` when
+     * Catch is disabled / sampled out / not yet started.
+     *
+     * ```kotlin
+     * try { risky() } catch (e: Throwable) { Sankofa.captureException(e) }
+     * ```
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun captureException(t: Throwable, options: CatchCaptureOptions = CatchCaptureOptions()): String {
+        if (!SankofaCatch.isStarted) return ""
+        return SankofaCatch.captureException(t, options)
+    }
+
+    /**
+     * Capture an arbitrary message — the non-throwing variant of
+     * [captureException]. Useful for non-fatal "this shouldn't happen"
+     * branches.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun captureMessage(message: String, options: CatchCaptureOptions = CatchCaptureOptions()): String {
+        if (!SankofaCatch.isStarted) return ""
+        return SankofaCatch.captureMessage(message, options)
+    }
+
+    /**
+     * Crashlytics-style breadcrumb log. Drops a free-text trail entry
+     * onto the ring buffer that rides on the next captured event.
+     *
+     * Doesn't bill — no event is emitted unless something else captures.
+     *
+     * ```kotlin
+     * Sankofa.log("checkout: applying coupon $code")
+     * ```
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun log(message: String, category: String? = null) {
+        if (!SankofaCatch.isStarted) return
+        SankofaCatch.log(message, category)
+    }
+
+    /**
+     * Set ambient user context that's stamped on every subsequent capture.
+     * Pass `null` to clear (e.g. on logout).
+     */
+    @JvmStatic
+    fun setUser(user: CatchUserContext?) {
+        if (!SankofaCatch.isStarted) return
+        SankofaCatch.setUser(user)
+    }
+
+    /** Set a single tag. */
+    @JvmStatic
+    fun setTag(key: String, value: String) {
+        if (!SankofaCatch.isStarted) return
+        SankofaCatch.setTag(key, value)
+    }
+
+    /** Bulk-set tags — merges into the existing tag map. */
+    @JvmStatic
+    fun setTags(tags: Map<String, String>) {
+        if (!SankofaCatch.isStarted) return
+        SankofaCatch.setTags(tags)
+    }
+
+    /** Set a single extra (arbitrary key/value) sent on every capture. */
+    @JvmStatic
+    fun setExtra(key: String, value: Any?) {
+        if (!SankofaCatch.isStarted) return
+        SankofaCatch.setExtra(key, value)
+    }
+
+    /** Push a breadcrumb onto the ring buffer. Use [log] for plain text. */
+    @JvmStatic
+    fun addBreadcrumb(crumb: CatchBreadcrumb) {
+        if (!SankofaCatch.isStarted) return
+        SankofaCatch.addBreadcrumb(crumb)
+    }
+
+    /** Force-flush queued Catch events (e.g. before a known process exit). */
+    @JvmStatic
+    fun flushCatch() {
+        if (!SankofaCatch.isStarted) return
+        SankofaCatch.flush()
     }
 
     /**
