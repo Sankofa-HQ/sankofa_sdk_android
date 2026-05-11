@@ -63,4 +63,15 @@ data class SankofaConfig(
 
     /** Optional app version string sent in the Catch device context. */
     val appVersion: String? = null,
+
+    /**
+     * Synchronous hook called AFTER an event has been composed but
+     * BEFORE it's enqueued. Return the (possibly modified) event to
+     * ship it; return `null` to drop it entirely. Use for PII
+     * scrubbing, noise filtering, or late tag enrichment.
+     *
+     * Throws are swallowed — a host hook can never block the capture
+     * pipeline.
+     */
+    val beforeSend: dev.sankofa.sdk.catchmod.BeforeSendFn? = null,
 )

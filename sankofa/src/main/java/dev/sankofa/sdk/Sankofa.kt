@@ -6,6 +6,7 @@ import dev.sankofa.sdk.catchmod.CatchBreadcrumb
 import dev.sankofa.sdk.catchmod.CatchCaptureOptions
 import dev.sankofa.sdk.catchmod.CatchUserContext
 import dev.sankofa.sdk.catchmod.SankofaCatch
+import dev.sankofa.sdk.catchmod.SankofaCatchScope
 import dev.sankofa.sdk.core.SankofaDeviceInfo
 import dev.sankofa.sdk.core.SankofaIdentity
 import dev.sankofa.sdk.core.SankofaLifecycleObserver
@@ -422,6 +423,7 @@ object Sankofa {
                 environment = config.catchEnvironment,
                 release = config.release,
                 appVersion = config.appVersion,
+                beforeSend = config.beforeSend,
             )
         }
 
@@ -680,6 +682,33 @@ object Sankofa {
     fun addBreadcrumb(crumb: CatchBreadcrumb) {
         if (!SankofaCatch.isStarted) return
         SankofaCatch.addBreadcrumb(crumb)
+    }
+
+    /**
+     * Run [fn] with a temporary scope. Mutations made via the scope
+     * (tags, extras, user, level, fingerprint) overlay onto any
+     * [captureException] / [captureMessage] calls inside [fn].
+     * Outside [fn] the scope is gone — async captures deferred past
+     * the closure's return will NOT see the scope.
+     *
+     * No-op when Catch isn't initialized; [fn] still runs with a sink
+     * scope so host code that does work alongside captures isn't skipped.
+     *
+     * ```kotlin
+     * Sankofa.withScope { scope ->
+     *     scope.setTag("flow", "checkout")
+     *     scope.setExtra("cart_id", cart.id)
+     *     Sankofa.captureException(err)
+     * }
+     * ```
+     */
+    @JvmStatic
+    fun <T> withScope(fn: (SankofaCatchScope) -> T): T {
+        return if (SankofaCatch.isStarted) {
+            SankofaCatch.withScope(fn)
+        } else {
+            fn(SankofaCatchScope())
+        }
     }
 
     /** Force-flush queued Catch events (e.g. before a known process exit). */

@@ -74,6 +74,15 @@ object SankofaCatch : SankofaPluggableModule {
     }
     private var readFlagSnapshot: (() -> Map<String, String>?)? = null
     private var readConfigSnapshot: (() -> Map<String, Any?>?)? = null
+    private var beforeSend: BeforeSendFn? = null
+
+    // Active withScope() stack. ThreadLocal so concurrent threads
+    // each see their own scope — captures fired on a background
+    // worker don't pick up the UI thread's scope, and vice versa.
+    private val scopeStack: ThreadLocal<ArrayDeque<SankofaCatchScope>> =
+        object : ThreadLocal<ArrayDeque<SankofaCatchScope>>() {
+            override fun initialValue(): ArrayDeque<SankofaCatchScope> = ArrayDeque()
+        }
 
     // ── Init ─────────────────────────────────────────────────────
 
@@ -87,6 +96,7 @@ object SankofaCatch : SankofaPluggableModule {
         captureUnhandled: Boolean = true,
         readFlagSnapshot: (() -> Map<String, String>?)? = null,
         readConfigSnapshot: (() -> Map<String, Any?>?)? = null,
+        beforeSend: BeforeSendFn? = null,
     ) {
         synchronized(stateLock) {
             if (this.prefs == null) {
@@ -99,6 +109,7 @@ object SankofaCatch : SankofaPluggableModule {
             this.appVersion = appVersion
             this.readFlagSnapshot = readFlagSnapshot
             this.readConfigSnapshot = readConfigSnapshot
+            this.beforeSend = beforeSend
         }
         SankofaModuleRegistry.register(this)
 
@@ -207,6 +218,29 @@ object SankofaCatch : SankofaPluggableModule {
     fun flush() = flushInternal()
 
     /**
+     * Run [fn] with a fresh scope. Mutations made via the scope
+     * (tags, extras, user, level, fingerprint) overlay onto any
+     * [captureException] / [captureMessage] calls inside [fn]. The
+     * scope is popped when [fn] returns — async captures deferred
+     * past the closure's return will NOT see the scope.
+     *
+     * Thread-isolated: each thread has its own scope stack, so a
+     * capture fired on a background worker won't pick up the UI
+     * thread's scope, and vice versa.
+     */
+    fun <T> withScope(fn: (SankofaCatchScope) -> T): T {
+        val scope = SankofaCatchScope()
+        val stack = scopeStack.get()!!
+        stack.addLast(scope)
+        try {
+            return fn(scope)
+        } finally {
+            stack.removeLast()
+            if (stack.isEmpty()) scopeStack.remove()
+        }
+    }
+
+    /**
      * True once [init] has been called at least once. Static helpers on
      * the parent [Sankofa] object check this so they can degrade to a
      * no-op when the host disabled Catch via `enableCatch = false` —
@@ -233,7 +267,14 @@ object SankofaCatch : SankofaPluggableModule {
         if (!enabled) return ""
         if (!shouldSample()) return ""
 
-        val level = options.level ?: if (type == "console_error") CatchLevel.WARNING else CatchLevel.ERROR
+        // Apply active withScope() overlay (if any). Layering order:
+        //   global setUser/setTags/setExtra (read below)
+        //   → top-of-stack scope (applyTo here)
+        //   → caller-supplied options (already merged in by applyTo)
+        val scope = scopeStack.get()?.lastOrNull()
+        val merged = scope?.applyTo(options) ?: options
+
+        val level = merged.level ?: if (type == "console_error") CatchLevel.WARNING else CatchLevel.ERROR
         val (exception, message) = when (kind) {
             is CaptureKind.Throwable -> CatchStackBuilder.fromThrowable(kind.t, mechanism) to null
             is CaptureKind.Message -> null to kind.s
@@ -256,24 +297,44 @@ object SankofaCatch : SankofaPluggableModule {
             distinctId = dev.sankofa.sdk.Sankofa.distinctId(),
             anonId = dev.sankofa.sdk.Sankofa.anonymousId(),
             sessionId = dev.sankofa.sdk.Sankofa.currentSessionId(),
-            tags = mergedTags(options),
-            extra = mergedExtra(options),
-            user = options.user ?: user,
+            tags = mergedTags(merged),
+            extra = mergedExtra(merged),
+            user = merged.user ?: user,
             device = buildDeviceContext(),
             release = releaseName,
             breadcrumbs = breadcrumbs.snapshot(),
-            fingerprint = options.fingerprint,
+            fingerprint = merged.fingerprint,
             flagSnapshot = readFlagSnapshot?.invoke() ?: autoFlagSnapshot(),
             configSnapshot = readConfigSnapshot?.invoke() ?: autoConfigSnapshot(),
-            traceId = options.traceId,
-            spanId = options.spanId,
+            traceId = merged.traceId,
+            spanId = merged.spanId,
             debugMeta = CatchDebugMetaCapture.capture(),
         )
 
-        buffer.add(event)
+        // beforeSend hook — host gets final say. A null return drops
+        // the event; an exception is treated as "pass through unchanged"
+        // because losing telemetry from a buggy hook is worse than
+        // the hook misbehaving.
+        val hook = beforeSend
+        val outgoing: CatchEvent? = if (hook != null) {
+            try {
+                hook.invoke(event)
+            } catch (err: Throwable) {
+                Log.w(TAG, "beforeSend threw — sending original event: ${err.message}")
+                event
+            }
+        } else {
+            event
+        }
+        if (outgoing == null) {
+            Log.d(TAG, "event ${event.eventId} dropped by beforeSend")
+            return ""
+        }
+
+        buffer.add(outgoing)
         persistToStorage()
         if (buffer.size >= BATCH_SIZE) flushInternal()
-        return event.eventId
+        return outgoing.eventId
     }
 
     /**

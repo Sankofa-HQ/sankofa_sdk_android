@@ -186,3 +186,102 @@ data class CatchCaptureOptions(
     val traceId: String? = null,
     val spanId: String? = null,
 )
+
+/**
+ * Synchronous hook called after an event has been composed but BEFORE
+ * the SDK enqueues it for transport. Return the (possibly modified)
+ * event to ship it; return `null` to drop it entirely.
+ *
+ * Use cases:
+ *   - PII scrubbing (e.g. strip `event.user?.email`)
+ *   - Noise filtering (e.g. drop known-benign exceptions)
+ *   - Tag enrichment from state unavailable at SDK init time
+ *
+ * Throwing inside the hook is treated like returning the event
+ * unchanged — a host bug must never block the capture pipeline.
+ */
+typealias BeforeSendFn = (CatchEvent) -> CatchEvent?
+
+/**
+ * Sentry-style temporary scope. Mutations made via the callback in
+ * `SankofaCatch.withScope { scope -> ... }` overlay onto the next
+ * captured event without polluting the global scope set via
+ * `setUser` / `setTags` / `setExtra`.
+ *
+ * ```kotlin
+ * SankofaCatch.withScope { scope ->
+ *     scope.setTag("checkout_step", "payment")
+ *     scope.setExtra("cart_id", cart.id)
+ *     Sankofa.captureException(err)
+ * }
+ * // Outside the closure, those tags / extras are gone.
+ * ```
+ */
+class SankofaCatchScope {
+    private val _tags: MutableMap<String, String> = mutableMapOf()
+    private val _extra: MutableMap<String, Any?> = mutableMapOf()
+    private var _user: CatchUserContext? = null
+    private var _userTouched = false
+    private var _level: CatchLevel? = null
+    private var _fingerprint: List<String>? = null
+
+    fun setTag(key: String, value: String): SankofaCatchScope {
+        _tags[key] = value
+        return this
+    }
+
+    fun setTags(tags: Map<String, String>): SankofaCatchScope {
+        _tags.putAll(tags)
+        return this
+    }
+
+    fun setExtra(key: String, value: Any?): SankofaCatchScope {
+        _extra[key] = value
+        return this
+    }
+
+    fun setUser(user: CatchUserContext?): SankofaCatchScope {
+        _user = user
+        _userTouched = true
+        return this
+    }
+
+    fun setLevel(level: CatchLevel): SankofaCatchScope {
+        _level = level
+        return this
+    }
+
+    fun setFingerprint(fingerprint: List<String>): SankofaCatchScope {
+        _fingerprint = fingerprint.toList()
+        return this
+    }
+
+    /**
+     * Layer this scope on top of the caller's [options]. Caller
+     * options take precedence (most specific wins); the global scope
+     * set on the client is applied separately so this merge only
+     * covers the scope ↔ options layer.
+     */
+    fun applyTo(options: CatchCaptureOptions): CatchCaptureOptions {
+        val merged = HashMap<String, String>(_tags.size + (options.tags?.size ?: 0))
+        merged.putAll(_tags)
+        options.tags?.let { merged.putAll(it) }
+
+        val mergedExtra = HashMap<String, Any?>(_extra.size + (options.extra?.size ?: 0))
+        mergedExtra.putAll(_extra)
+        options.extra?.let { mergedExtra.putAll(it) }
+
+        return CatchCaptureOptions(
+            level = options.level ?: _level,
+            tags = if (merged.isEmpty()) null else merged,
+            extra = if (mergedExtra.isEmpty()) null else mergedExtra,
+            // User: caller wins, then scope. _userTouched distinguishes
+            // "scope explicitly cleared user with setUser(null)" from
+            // "scope never set user".
+            user = options.user ?: if (_userTouched) _user else null,
+            fingerprint = options.fingerprint ?: _fingerprint,
+            traceId = options.traceId,
+            spanId = options.spanId,
+        )
+    }
+}
