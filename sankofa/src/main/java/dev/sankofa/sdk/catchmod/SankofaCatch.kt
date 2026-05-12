@@ -309,6 +309,7 @@ object SankofaCatch : SankofaPluggableModule {
             traceId = merged.traceId,
             spanId = merged.spanId,
             debugMeta = CatchDebugMetaCapture.capture(),
+            screen = dev.sankofa.sdk.Sankofa.currentScreenName(),
         )
 
         // beforeSend hook — host gets final say. A null return drops

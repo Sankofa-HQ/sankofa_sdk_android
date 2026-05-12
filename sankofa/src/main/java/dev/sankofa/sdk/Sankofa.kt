@@ -232,6 +232,18 @@ object Sankofa {
     internal fun getCurrentScreenName(): String = currentScreen
 
     /**
+     * Public read of the active screen / route the SDK currently
+     * believes the user is on. Resolution: explicit `screen()` /
+     * `@SankofaScreen` annotation > activity name fallback > empty
+     * string. Catch reads this on every error capture so the
+     * dashboard can filter and link by screen without breadcrumb
+     * scans; Pulse reads it on submit for the same reason.
+     */
+    @JvmStatic
+    fun currentScreenName(): String? =
+        if (currentScreen.isNotEmpty()) currentScreen else null
+
+    /**
      * Returns true when [currentScreen] has not been tagged yet (either
      * via [SankofaScreen] annotation, manual [screen] call, or activity
      * fallback). Used by the replay recorder to skip cold-start frames

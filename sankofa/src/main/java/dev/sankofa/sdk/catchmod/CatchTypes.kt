@@ -138,6 +138,13 @@ data class CatchEvent(
     val spanId: String? = null,
     val replayChunkIndex: Int? = null,
     val debugMeta: CatchDebugMeta? = null,
+    /**
+     * Active screen / route at capture time. Cross-product
+     * correlation key shared with Heatmap, Replay, Pulse, and Plan.
+     * Sourced from `Sankofa.currentScreen` (set explicitly via
+     * `screen()` or by the `@SankofaScreen` annotation).
+     */
+    val screen: String? = null,
 )
 
 data class CatchHandshakeConfig(

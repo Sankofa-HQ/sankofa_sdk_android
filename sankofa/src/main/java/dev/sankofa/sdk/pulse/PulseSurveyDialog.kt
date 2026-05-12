@@ -410,6 +410,7 @@ internal class PulseSurveyDialog(
         }
         val payload = PulseSubmitPayload(
             surveyId = survey.id,
+            screen = dev.sankofa.sdk.Sankofa.currentScreenName(),
             answers = map,
         )
         onSubmit(payload)

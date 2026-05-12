@@ -128,6 +128,13 @@ internal data class PulseSubmitPayload(
     @SerializedName("survey_id") val surveyId: String,
     @SerializedName("respondent") val respondent: PulseRespondent = PulseRespondent(),
     @SerializedName("context") val context: PulseContext? = null,
+    /**
+     * Active screen / route at submission time. First-class
+     * cross-product correlation key — same value Heatmap, Catch,
+     * and Replay use, so dashboard deep links between products
+     * stay scoped to the same surface.
+     */
+    @SerializedName("screen") val screen: String? = null,
     @SerializedName("submitted_at") val submittedAt: String? = null,
     @SerializedName("answers") val answers: Map<String, Any?> = emptyMap(),
 )

@@ -53,6 +53,7 @@ internal object CatchJson {
         e.spanId?.let { o.put("span_id", it) }
         e.replayChunkIndex?.let { o.put("replay_chunk_index", it) }
         e.debugMeta?.let { o.put("debug_meta", encodeDebugMeta(it)) }
+        e.screen?.let { if (it.isNotEmpty()) o.put("screen", it) }
         return o
     }
 
