@@ -462,6 +462,12 @@ object Sankofa {
         }
 
         lifecycleObserver.register()
+
+        // Live-presence heartbeat — independent of analytics flush so
+        // it ticks at its own cadence (15s) while the app is
+        // foregrounded. Cheap one-tiny-POST-per-tick; paused on
+        // ProcessLifecycle ON_STOP.
+        dev.sankofa.sdk.core.PresenceHeartbeat.start(base, apiKey)
     }
 
     // --- Public API ---
