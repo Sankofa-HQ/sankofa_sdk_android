@@ -482,6 +482,17 @@ object Sankofa {
         this.currentScreen = name
         this.isManualScreen = true
         track("\$screen_view", properties + mapOf("\$screen_name" to name))
+        // Canonical screen signal — fires regardless of which Sankofa
+        // products the host has enabled, so the lexicon + dwell +
+        // presence are always populated.
+        val ep = _endpoint
+        val key = _apiKey
+        val did = identity.distinctId
+        if (ep != null && key != null && did != null) {
+            dev.sankofa.sdk.core.ScreenSeen.emit(
+                ep, key, name, did, sessionManager.sessionId, properties,
+            )
+        }
     }
 
     /**
