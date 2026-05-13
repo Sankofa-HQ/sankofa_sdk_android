@@ -63,6 +63,7 @@ object Sankofa {
     private lateinit var lifecycleObserver: SankofaLifecycleObserver
     private lateinit var replayUploader: ReplayUploader
     private lateinit var replayRecorder: ReplayRecorder
+    private lateinit var heatmapSnapshotter: dev.sankofa.sdk.heatmap.HeatmapSnapshotter
     private lateinit var httpClient: SankofaHttpClient
     private lateinit var config: SankofaConfig
     private lateinit var appContext: Context
@@ -328,9 +329,21 @@ object Sankofa {
             if (tag.isNotEmpty()) {
                 currentScreen = tag
                 logger.debug("📍 Auto-tagged screen: $currentScreen")
+                // Auto-tagged screens deserve the same dedicated-snapshot
+                // treatment as manual `screen(...)` calls.
+                if (::heatmapSnapshotter.isInitialized) {
+                    heatmapSnapshotter.scheduleCapture(tag)
+                }
             }
             // Empty tag → framework host activity, leave currentScreen
             // alone so the host language's screen() call wins.
+        }
+
+        // Always update the snapshotter's activity ref so it knows
+        // which window to grab pixels from when the delayed capture
+        // fires.
+        if (::heatmapSnapshotter.isInitialized) {
+            heatmapSnapshotter.setActivity(activity)
         }
     }
 
@@ -401,6 +414,20 @@ object Sankofa {
             bitmapPool = bitmapPool,
             maskAllInputs = config.maskAllInputs,
             uploader = replayUploader,
+        )
+
+        // Heatmap snapshotter — dedicated, stability-gated background
+        // capture. Independent of the replay frame loop so a host that
+        // has recordSessions=false still gets clean heatmap backdrops.
+        val bundledAppVersion: String = config.appVersion ?: try {
+            appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName ?: "unknown"
+        } catch (t: Throwable) { "unknown" }
+        heatmapSnapshotter = dev.sankofa.sdk.heatmap.HeatmapSnapshotter(
+            apiKey = apiKey,
+            endpoint = base,
+            appVersion = bundledAppVersion,
+            maskAllInputs = config.maskAllInputs,
+            logger = logger,
         )
 
         sessionManager = SankofaSessionManager(
@@ -492,6 +519,12 @@ object Sankofa {
             dev.sankofa.sdk.core.ScreenSeen.emit(
                 ep, key, name, did, sessionManager.sessionId, properties,
             )
+        }
+        // Stability-gated heatmap snapshot — deduped per
+        // (screen, app_version, viewport-bucket) inside the snapshotter,
+        // so repeated tags of the same screen are no-ops.
+        if (::heatmapSnapshotter.isInitialized) {
+            heatmapSnapshotter.scheduleCapture(name)
         }
     }
 
