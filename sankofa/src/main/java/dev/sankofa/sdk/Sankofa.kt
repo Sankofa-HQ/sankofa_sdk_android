@@ -852,6 +852,34 @@ object Sankofa {
                 logger.debug("📦 Deploy update available: $label")
             }
         }
+
+        // ── Reverse handshake — SDK Health report ──
+        // Audit the host's integration and POST the result to
+        // /api/v1/handshake/integrations so the dashboard's SDK Health
+        // surface reflects this Android host. Fire-and-forget on IO so
+        // a slow network never blocks session bring-up.
+        try {
+            val resolvedAppVersion: String = config.appVersion ?: try {
+                appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName ?: ""
+            } catch (_: Throwable) { "" }
+            val status = dev.sankofa.sdk.core.IntegrationAudit.audit(
+                context = appContext,
+                handshakeOk = handshake != null,
+                appVersionFromHost = !config.appVersion.isNullOrBlank(),
+            )
+            scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                dev.sankofa.sdk.core.IntegrationReporter.report(
+                    baseEndpoint = base,
+                    apiKey = apiKey,
+                    appVersion = resolvedAppVersion,
+                    statuses = listOf(status),
+                    debug = config.debug,
+                    onLog = { msg -> logger.debug(msg) },
+                )
+            }
+        } catch (t: Throwable) {
+            logger.debug("Integration audit threw — swallowed: ${t.message}")
+        }
     }
 
     /**
