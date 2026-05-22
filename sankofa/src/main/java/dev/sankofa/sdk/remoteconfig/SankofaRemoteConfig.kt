@@ -82,6 +82,39 @@ object SankofaRemoteConfig : SankofaPluggableModule {
         fire(changed, removed)
     }
 
+    /** Self-audit the host's Remote Config wiring. */
+    fun checkIntegration(): dev.sankofa.sdk.core.ModuleIntegrationStatus {
+        val missing = mutableListOf<String>()
+        val warnings = mutableListOf<String>()
+        synchronized(stateLock) {
+            if (prefs == null) {
+                missing.add(
+                    "SankofaRemoteConfig.init(context) has not been called — the prefs handle is null. Call it from your Application.onCreate.",
+                )
+            }
+            if (values.isEmpty() && defaults.isEmpty()) {
+                missing.add(
+                    "No values from server and no bundled defaults supplied. Every get(key, fallback) returns the inline fallback.",
+                )
+            } else if (values.isEmpty()) {
+                warnings.add(
+                    "No values from server yet — handshake may not have completed, or the project has no config items. Defaults will be used.",
+                )
+            }
+            if (etag.isEmpty()) {
+                warnings.add(
+                    "No etag stored — the SDK cannot short-circuit handshakes with If-None-Match.",
+                )
+            }
+        }
+        return dev.sankofa.sdk.core.ModuleIntegrationStatus(
+            module = "config",
+            level = dev.sankofa.sdk.core.ModuleIntegrationStatus.deriveLevel(missing),
+            missing = missing,
+            warnings = warnings,
+        )
+    }
+
     // ── Public API ───────────────────────────────────────────────────
 
     /**

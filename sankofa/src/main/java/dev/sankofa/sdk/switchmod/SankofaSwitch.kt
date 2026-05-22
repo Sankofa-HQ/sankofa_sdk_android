@@ -104,6 +104,39 @@ object SankofaSwitch : SankofaPluggableModule {
         fire(changed, removed)
     }
 
+    /** Self-audit the host's Switch wiring. */
+    fun checkIntegration(): dev.sankofa.sdk.core.ModuleIntegrationStatus {
+        val missing = mutableListOf<String>()
+        val warnings = mutableListOf<String>()
+        synchronized(stateLock) {
+            if (prefs == null) {
+                missing.add(
+                    "SankofaSwitch.init(context) has not been called — the prefs handle is null. Call it from your Application.onCreate.",
+                )
+            }
+            if (flags.isEmpty() && defaults.isEmpty()) {
+                missing.add(
+                    "No flags from server and no bundled defaults supplied. Every getFlag(key) returns the inline fallback value.",
+                )
+            } else if (flags.isEmpty()) {
+                warnings.add(
+                    "No flags from server yet — handshake may not have completed, or the project has no flags. Defaults will be used.",
+                )
+            }
+            if (etag.isEmpty()) {
+                warnings.add(
+                    "No etag stored — the SDK cannot short-circuit handshakes with If-None-Match.",
+                )
+            }
+        }
+        return dev.sankofa.sdk.core.ModuleIntegrationStatus(
+            module = "switch",
+            level = dev.sankofa.sdk.core.ModuleIntegrationStatus.deriveLevel(missing),
+            missing = missing,
+            warnings = warnings,
+        )
+    }
+
     // ── Public API ───────────────────────────────────────────────────
 
     @JvmStatic

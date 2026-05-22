@@ -854,25 +854,47 @@ object Sankofa {
         }
 
         // ── Reverse handshake — SDK Health report ──
-        // Audit the host's integration and POST the result to
-        // /api/v1/handshake/integrations so the dashboard's SDK Health
-        // surface reflects this Android host. Fire-and-forget on IO so
-        // a slow network never blocks session bring-up.
+        // Audit the host's integration (analytics + every linked module)
+        // and POST the batch to /api/v1/handshake/integrations so the
+        // dashboard's SDK Health surface reflects every module on this
+        // Android host. Fire-and-forget on IO so a slow network never
+        // blocks session bring-up.
         try {
             val resolvedAppVersion: String = config.appVersion ?: try {
                 appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName ?: ""
             } catch (_: Throwable) { "" }
-            val status = dev.sankofa.sdk.core.IntegrationAudit.audit(
+            val analyticsStatus = dev.sankofa.sdk.core.IntegrationAudit.audit(
                 context = appContext,
                 handshakeOk = handshake != null,
                 appVersionFromHost = !config.appVersion.isNullOrBlank(),
             )
+            val batch = mutableListOf(analyticsStatus)
+
+            // Each module's audit is wrapped so a single broken module
+            // can't take down the rest of the batch. The ModuleRegistry
+            // only contains modules whose init() ran — uninitialised
+            // singletons (host never imported / never wired) are
+            // absent and therefore not audited at all.
+            val registry = dev.sankofa.sdk.core.SankofaModuleRegistry
+            if (registry.has(dev.sankofa.sdk.core.SankofaModuleName.CATCH)) {
+                runCatching { batch.add(dev.sankofa.sdk.catchmod.SankofaCatch.checkIntegration()) }
+            }
+            if (registry.has(dev.sankofa.sdk.core.SankofaModuleName.SWITCH)) {
+                runCatching { batch.add(dev.sankofa.sdk.switchmod.SankofaSwitch.checkIntegration()) }
+            }
+            if (registry.has(dev.sankofa.sdk.core.SankofaModuleName.CONFIG)) {
+                runCatching { batch.add(dev.sankofa.sdk.remoteconfig.SankofaRemoteConfig.checkIntegration()) }
+            }
+            if (registry.has(dev.sankofa.sdk.core.SankofaModuleName.PULSE)) {
+                runCatching { batch.add(dev.sankofa.sdk.pulse.SankofaPulse.checkIntegration()) }
+            }
+
             scope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 dev.sankofa.sdk.core.IntegrationReporter.report(
                     baseEndpoint = base,
                     apiKey = apiKey,
                     appVersion = resolvedAppVersion,
-                    statuses = listOf(status),
+                    statuses = batch,
                     debug = config.debug,
                     onLog = { msg -> logger.debug(msg) },
                 )

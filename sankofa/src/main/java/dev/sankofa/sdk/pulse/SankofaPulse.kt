@@ -124,6 +124,38 @@ object SankofaPulse : SankofaPluggableModule {
     @JvmStatic
     fun isRegistered(): Boolean = registered
 
+    /** Self-audit the host's Pulse wiring. */
+    fun checkIntegration(): dev.sankofa.sdk.core.ModuleIntegrationStatus {
+        val missing = mutableListOf<String>()
+        val warnings = mutableListOf<String>()
+        if (!registered) {
+            missing.add(
+                "SankofaPulse.register(context) has not succeeded yet. Call register() AFTER Sankofa.init() returns.",
+            )
+        }
+        if (client == null) {
+            missing.add(
+                "PulseClient was not constructed — usually means register() ran before the host had an apiKey / endpoint.",
+            )
+        }
+        if (!enabled) {
+            warnings.add(
+                "Pulse is disabled by the server handshake. Open Project Settings → Pulse in the dashboard to enable it.",
+            )
+        }
+        if (registered && cachedSurveys.isEmpty()) {
+            warnings.add(
+                "No surveys cached yet — first refresh may still be in flight, or no surveys are published in the project.",
+            )
+        }
+        return dev.sankofa.sdk.core.ModuleIntegrationStatus(
+            module = "pulse",
+            level = dev.sankofa.sdk.core.ModuleIntegrationStatus.deriveLevel(missing),
+            missing = missing,
+            warnings = warnings,
+        )
+    }
+
     // ── SankofaPluggableModule ───────────────────────────────────────
 
     override suspend fun applyHandshake(config: Map<String, Any?>) {

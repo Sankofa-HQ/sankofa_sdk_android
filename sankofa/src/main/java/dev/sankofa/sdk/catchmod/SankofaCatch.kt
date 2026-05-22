@@ -148,6 +148,44 @@ object SankofaCatch : SankofaPluggableModule {
         }
     }
 
+    /**
+     * Self-audit the host's Catch wiring. Mirrors the RN + Flutter
+     * audits — minimal but real checks that the dashboard SDK Health
+     * surface can render.
+     */
+    fun checkIntegration(): dev.sankofa.sdk.core.ModuleIntegrationStatus {
+        val missing = mutableListOf<String>()
+        val warnings = mutableListOf<String>()
+
+        if (prefs == null) {
+            missing.add(
+                "SankofaCatch.init() has not run — the prefs handle is null. Make sure your Application's onCreate calls Sankofa.init() before any Catch usage.",
+            )
+        }
+        if (!enabled) {
+            missing.add(
+                "Catch is disabled by the server-side handshake. Open Project Settings → Catch in the dashboard or check the org plan tier.",
+            )
+        }
+        if (!handlerInstalled.get()) {
+            warnings.add(
+                "Uncaught-exception handler is not installed — only manually captured errors will surface. Call init(..., captureUnhandled = true).",
+            )
+        }
+        if (errorSampleRate <= 0) {
+            warnings.add(
+                "errorSampleRate is $errorSampleRate — every captured event will be sampled out.",
+            )
+        }
+
+        return dev.sankofa.sdk.core.ModuleIntegrationStatus(
+            module = "catch",
+            level = dev.sankofa.sdk.core.ModuleIntegrationStatus.deriveLevel(missing),
+            missing = missing,
+            warnings = warnings,
+        )
+    }
+
     // ── Public API ──────────────────────────────────────────────
 
     @JvmStatic
