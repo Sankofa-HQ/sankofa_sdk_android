@@ -4,9 +4,13 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
+import android.view.SurfaceView
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.WebView
 import android.widget.EditText
+import android.widget.VideoView
 
 /**
  * Traverses the View hierarchy and draws privacy masks (solid black rectangles)
@@ -33,15 +37,21 @@ import android.widget.EditText
  *   subclasses `androidx.appcompat.widget.AppCompatEditText`.
  * - Any view whose class name contains `ReactEditText` / `RCTTextInput`
  *   (defensive — covers any future RN variant that doesn't subclass EditText).
+ * - "Opaque-content" surfaces whose pixels we can't reason about and which
+ *   routinely render sensitive content: [WebView] (login / payment / 3DS
+ *   forms), [SurfaceView] / [TextureView] (camera previews, video, GL), and
+ *   [VideoView]. Privacy beats fidelity here — a black box is the safe default.
  * - Any [View] where `view.tag == "sankofa_mask"` (developer opt-in).
+ * - Jetpack Compose nodes tagged with `Modifier.sankofaMask()`. Compose draws
+ *   into a single `AndroidComposeView` with no per-field child View, so the
+ *   View walk below can't see Compose `TextField`s — the modifier reports its
+ *   window bounds into [ComposeMaskRegistry] instead, merged in by
+ *   [collectMaskRects].
  *
  * ## NOT auto-masked
  * - `TextView` and its subclasses (RN's `ReactTextView` for `<Text>` lowers
  *   here). Masking every TextView would black out every label and button
  *   string, which is what high-fidelity replay specifically should NOT do.
- * - `WebView` — auto-masking caught RN-internal helper webviews and produced
- *   false positives. Use `view.tag = "sankofa_mask"` on your own WebViews if
- *   you need privacy on them.
  */
 internal object MaskTraversal {
 
@@ -61,6 +71,18 @@ internal object MaskTraversal {
         rootView.getLocationOnScreen(rootLocation)
         val location = IntArray(2)
         traverse(rootView, out, location, rootLocation, maskAllInputs)
+
+        // Merge Compose-reported masks. These are window-relative bounds, which
+        // align with the View-tree rects above because `rootView` is the decor
+        // view (the window's origin). We always honour them — a Compose field
+        // is tagged with Modifier.sankofaMask() precisely because it's sensitive,
+        // independent of the maskAllInputs toggle.
+        val composeRects = ComposeMaskRegistry.snapshot()
+        if (composeRects.isNotEmpty()) {
+            for (r in composeRects) {
+                if (r.width() > 0 && r.height() > 0) out.add(r)
+            }
+        }
         return out
     }
 
@@ -92,7 +114,7 @@ internal object MaskTraversal {
         if (view.visibility != View.VISIBLE) return
 
         val shouldMask =
-            (maskAllInputs && isTextInputLike(view)) ||
+            (maskAllInputs && (isTextInputLike(view) || isOpaqueSensitiveSurface(view))) ||
             view.tag == SANKOFA_MASK_TAG
 
         if (shouldMask && view.width > 0 && view.height > 0) {
@@ -135,6 +157,24 @@ internal object MaskTraversal {
         return name.contains("ReactEditText") ||
                name.contains("RCTTextInput") ||
                name.contains("ReactTextInput")
+    }
+
+    /**
+     * Views whose pixels we can't introspect and which commonly carry
+     * sensitive content. We mask them wholesale because the alternative —
+     * shipping a screenshot of a payment WebView or a camera preview — is a
+     * privacy violation, and there's no reliable way to redact only part of
+     * an opaque surface. Hosts with a known-safe WebView can carve it back in
+     * later via an allow-list; the safe default is to black it out.
+     */
+    private fun isOpaqueSensitiveSurface(view: View): Boolean {
+        if (view is WebView) return true
+        if (view is SurfaceView) return true
+        if (view is TextureView) return true
+        if (view is VideoView) return true
+        // Custom subclasses that don't extend the framework types (e.g. some
+        // cross-platform WebView wrappers) still announce themselves by name.
+        return view.javaClass.name.contains("WebView")
     }
 
     const val SANKOFA_MASK_TAG = "sankofa_mask"

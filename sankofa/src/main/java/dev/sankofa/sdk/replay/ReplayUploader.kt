@@ -8,6 +8,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import android.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -41,7 +43,15 @@ internal class ReplayUploader(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
 ) {
     private val frameChannel = Channel<FrameData>(capacity = Channel.UNLIMITED)
-    private val frameBuffer = mutableListOf<FrameData>()
+
+    // All access to [frameBuffer] is guarded by [frameLock]; it is touched by
+    // both the channel-drain coroutine (add) and flush()/uploadBatch (snapshot
+    // + remove), which can run on different threads. [uploadMutex] serializes
+    // uploads so two concurrent uploadBatch calls can't reuse the same
+    // chunkIndex (server-side overwrite) or interleave buffer removal.
+    private val frameBuffer = ArrayList<FrameData>()
+    private val frameLock = Any()
+    private val uploadMutex = Mutex()
     private val touchEventsBuffer = CopyOnWriteArrayList<Map<String, Any>>()
 
     private var sessionId: String = ""
@@ -63,10 +73,17 @@ internal class ReplayUploader(
         // Drain the channel and batch-upload frames on a background coroutine
         scope.launch {
             for (frame in frameChannel) {
-                frameBuffer.add(frame)
-                if (frameBuffer.size >= chunkFrameCount) {
-                    uploadBatch()
+                val shouldUpload = synchronized(frameLock) {
+                    frameBuffer.add(frame)
+                    // Bound memory: if uploads have been failing (server down,
+                    // offline), drop the oldest frames so base64'd WebP bytes
+                    // can't accumulate without limit and OOM the process.
+                    while (frameBuffer.size > MAX_BUFFERED_FRAMES) {
+                        frameBuffer.removeAt(0)
+                    }
+                    frameBuffer.size >= chunkFrameCount
                 }
+                if (shouldUpload) uploadBatch()
             }
         }
     }
@@ -128,17 +145,24 @@ internal class ReplayUploader(
                 "screen" to screen
             )
         )
+        // Bound the touch buffer the same way as frames — a long upload outage
+        // shouldn't let tap events grow without limit.
+        while (touchEventsBuffer.size > MAX_BUFFERED_TOUCH_EVENTS) {
+            touchEventsBuffer.removeAt(0)
+        }
     }
 
     /** Force-flush remaining frames – called when the app goes to background. */
     suspend fun flush() {
-        if (frameBuffer.isNotEmpty()) uploadBatch()
+        val hasFrames = synchronized(frameLock) { frameBuffer.isNotEmpty() }
+        if (hasFrames) uploadBatch()
     }
 
-    private suspend fun uploadBatch() {
-        if (frameBuffer.isEmpty() || sessionId.isEmpty()) return
-
-        val framesAttemptingUpload = frameBuffer.toList()
+    private suspend fun uploadBatch() = uploadMutex.withLock {
+        val framesAttemptingUpload = synchronized(frameLock) {
+            if (frameBuffer.isEmpty() || sessionId.isEmpty()) return@withLock
+            frameBuffer.toList()
+        }
         val eventsAttemptingUpload = touchEventsBuffer.toList()
 
         val frames = framesAttemptingUpload.map { 
@@ -181,11 +205,12 @@ internal class ReplayUploader(
         if (success) {
             chunkIndex++
             prefs.edit().putInt(chunkKey(sessionId), chunkIndex).apply()
-            
-            // Only clear if the upload succeeded
-            frameBuffer.removeAll(framesAttemptingUpload)
+
+            // Only clear if the upload succeeded. Remove exactly the frames we
+            // sent (newer frames added during the upload stay queued).
+            synchronized(frameLock) { frameBuffer.removeAll(framesAttemptingUpload) }
             touchEventsBuffer.removeAll(eventsAttemptingUpload)
-            
+
             logger.debug("🚀 Replay chunk ${chunkIndex - 1} uploaded (${frames.size} frames)")
         } else {
             logger.debug("⚠️ Replay chunk upload failed – keeping in buffer for retry")
@@ -197,5 +222,13 @@ internal class ReplayUploader(
     companion object {
         private const val PREFS_NAME = "sankofa_replay"
         private const val FRAMES_PER_CHUNK = 5
+
+        /**
+         * Hard caps so a sustained upload outage can't grow memory without
+         * bound. At ~2fps, 300 frames is ~2.5 min of unsent recording; beyond
+         * that the oldest frames are dropped (the recent tail is more useful).
+         */
+        private const val MAX_BUFFERED_FRAMES = 300
+        private const val MAX_BUFFERED_TOUCH_EVENTS = 2_000
     }
 }

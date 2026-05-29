@@ -350,21 +350,7 @@ object SankofaCatch : SankofaPluggableModule {
             screen = dev.sankofa.sdk.Sankofa.currentScreenName(),
         )
 
-        // beforeSend hook — host gets final say. A null return drops
-        // the event; an exception is treated as "pass through unchanged"
-        // because losing telemetry from a buggy hook is worse than
-        // the hook misbehaving.
-        val hook = beforeSend
-        val outgoing: CatchEvent? = if (hook != null) {
-            try {
-                hook.invoke(event)
-            } catch (err: Throwable) {
-                Log.w(TAG, "beforeSend threw — sending original event: ${err.message}")
-                event
-            }
-        } else {
-            event
-        }
+        val outgoing = applyBeforeSend(event)
         if (outgoing == null) {
             Log.d(TAG, "event ${event.eventId} dropped by beforeSend")
             return ""
@@ -413,10 +399,31 @@ object SankofaCatch : SankofaPluggableModule {
             configSnapshot = readConfigSnapshot?.invoke() ?: autoConfigSnapshot(),
             debugMeta = CatchDebugMetaCapture.capture(),
         )
-        buffer.add(event)
+        // ANR/synthetic events get the same host beforeSend treatment as the
+        // throwable/message path — PII scrubbing configured by the host must
+        // not be bypassed just because the event didn't originate as a Throwable.
+        val outgoing = applyBeforeSend(event) ?: return ""
+        buffer.add(outgoing)
         persistToStorage()
         if (buffer.size >= BATCH_SIZE) flushInternal()
-        return event.eventId
+        return outgoing.eventId
+    }
+
+    /**
+     * Runs the host [beforeSend] hook. Returns the (possibly mutated) event,
+     * or null to drop it. A throwing hook is treated as "pass through
+     * unchanged" — losing telemetry to a buggy hook is worse than the hook
+     * misbehaving. Applied on EVERY capture path (handled, message, ANR, and
+     * fatal) so host PII scrubbing is never silently skipped.
+     */
+    private fun applyBeforeSend(event: CatchEvent): CatchEvent? {
+        val hook = beforeSend ?: return event
+        return try {
+            hook.invoke(event)
+        } catch (err: Throwable) {
+            Log.w(TAG, "beforeSend threw — sending original event: ${err.message}")
+            event
+        }
     }
 
     /**
@@ -633,15 +640,21 @@ object SankofaCatch : SankofaPluggableModule {
                     configSnapshot = readConfigSnapshot?.invoke() ?: autoConfigSnapshot(),
                     debugMeta = CatchDebugMetaCapture.capture(),
                 )
-                buffer.addFirst(event)
-                // Synchronous commit — the process is about to die, so an
-                // async apply() would lose the write. This is the durable
-                // record; the network flush below is best-effort on top.
-                persistToStorage(sync = true)
-                // Best-effort synchronous flush so the event lands
-                // before the process dies. If it fails (offline / hung
-                // socket), the committed copy above is resent on next launch.
-                flushInternal()
+                // Run beforeSend even on the fatal path so host PII scrubbing
+                // applies to crashes too. A null return honours the host's
+                // explicit choice to drop; anything else is persisted.
+                val outgoing = applyBeforeSend(event)
+                if (outgoing != null) {
+                    buffer.addFirst(outgoing)
+                    // Synchronous commit — the process is about to die, so an
+                    // async apply() would lose the write. This is the durable
+                    // record; the network flush below is best-effort on top.
+                    persistToStorage(sync = true)
+                    // Best-effort synchronous flush so the event lands
+                    // before the process dies. If it fails (offline / hung
+                    // socket), the committed copy above is resent on next launch.
+                    flushInternal()
+                }
             } catch (err: Throwable) {
                 Log.e(TAG, "uncaught handler itself threw: ${err.message}")
             }

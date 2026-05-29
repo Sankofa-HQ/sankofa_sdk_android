@@ -112,8 +112,20 @@ Sankofa.withScope { scope ->
 
 ### Session Replay — masking
 
+Every `EditText` (and React Native text input) is masked automatically when `maskAllInputs = true`. So are **opaque content surfaces** that routinely show sensitive data and can't be partially redacted — `WebView` (login / payment / 3DS forms), `SurfaceView`, `TextureView`, and `VideoView` — which are drawn as solid black boxes. Mask anything else explicitly:
+
 ```kotlin
-myView.sankofaMask = true  // Auto-masks this view in replays
+myView.sankofaMask = true  // Classic View: mask this view in replays
+```
+
+**Jetpack Compose:** Compose draws into a single `AndroidComposeView`, so the View-tree walker can't see individual `TextField`s. Tag sensitive composables with the `Modifier.sankofaMask()` extension instead — it reports the node's bounds to the SDK and clears them automatically when the composable leaves composition:
+
+```kotlin
+OutlinedTextField(
+    value = card,
+    onValueChange = { card = it },
+    modifier = Modifier.sankofaMask(),   // masked in replays
+)
 ```
 
 ### Compose scroll-offset tagging

@@ -70,6 +70,12 @@ dependencies {
     // Gson – JSON serialization
     implementation(libs.gson)
 
+    // Jetpack Compose UI – compileOnly so non-Compose hosts pull nothing in.
+    // Used only by Modifier.sankofaMask() (a plain ModifierNodeElement, no
+    // @Composable functions, so no Compose compiler plugin is required). Hosts
+    // that use Compose already provide this artifact at runtime.
+    compileOnly(libs.compose.ui)
+
     // Lifecycle – ProcessLifecycleOwner for background detection
     implementation(libs.lifecycle.process)
     implementation(libs.lifecycle.common.java8)

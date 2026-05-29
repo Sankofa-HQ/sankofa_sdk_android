@@ -36,7 +36,7 @@ internal abstract class AppDatabase : RoomDatabase() {
                     // because dropping the queue silently loses analytics. It is
                     // kept (rather than removed) so a missing migration degrades
                     // to "lose transient events" instead of "crash the host app".
-                    .fallbackToDestructiveMigration()
+                    .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }
             }

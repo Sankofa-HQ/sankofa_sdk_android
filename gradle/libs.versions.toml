@@ -9,6 +9,7 @@ okhttp = "4.12.0"
 gson = "2.10.1"
 lifecycle = "2.8.3"
 coroutines = "1.8.1"
+composeUi = "1.7.6"
 junit = "4.13.2"
 mockk = "1.13.11"
 robolectric = "4.12.2"
@@ -25,6 +26,7 @@ gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
 lifecycle-process = { group = "androidx.lifecycle", name = "lifecycle-process", version.ref = "lifecycle" }
 lifecycle-common-java8 = { group = "androidx.lifecycle", name = "lifecycle-common-java8", version.ref = "lifecycle" }
 coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+compose-ui = { group = "androidx.compose.ui", name = "ui", version.ref = "composeUi" }
 coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
