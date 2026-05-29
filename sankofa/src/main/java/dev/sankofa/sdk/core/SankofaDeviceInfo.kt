@@ -85,5 +85,5 @@ internal object SankofaDeviceInfo {
         return metrics
     }
 
-    const val SANKOFA_SDK_VERSION = "1.0.0"
+    const val SANKOFA_SDK_VERSION = dev.sankofa.sdk.SankofaVersion.SDK_VERSION
 }

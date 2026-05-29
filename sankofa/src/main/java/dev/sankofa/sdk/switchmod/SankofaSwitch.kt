@@ -99,9 +99,9 @@ object SankofaSwitch : SankofaPluggableModule {
             FlagDecision.fromWire(value)?.let { incoming[key] = it }
         }
         val tag = config["etag"] as? String ?: ""
-        val (changed, removed) = diffAndApply(incoming, tag)
+        val diff = diffAndApply(incoming, tag)
         persistToStorage()
-        fire(changed, removed)
+        fire(diff)
     }
 
     /** Self-audit the host's Switch wiring. */
@@ -190,28 +190,34 @@ object SankofaSwitch : SankofaPluggableModule {
         flags[key] ?: defaults[key]
     }
 
-    private fun diffAndApply(incoming: Map<String, FlagDecision>, tag: String): Pair<Set<String>, Set<String>> {
+    /** A computed diff with the changed values captured atomically under the lock. */
+    private class Diff(
+        val changed: Map<String, FlagDecision?>,
+        val removed: Set<String>,
+    )
+
+    private fun diffAndApply(incoming: Map<String, FlagDecision>, tag: String): Diff {
         synchronized(stateLock) {
-            val changed = mutableSetOf<String>()
+            val changed = LinkedHashMap<String, FlagDecision?>()
             val removed = mutableSetOf<String>()
             for (key in flags.keys) {
                 if (!incoming.containsKey(key)) removed.add(key)
             }
             for ((key, decision) in incoming) {
-                if (flags[key] != decision) changed.add(key)
+                if (flags[key] != decision) changed[key] = decision
             }
             flags = incoming.toMap()
             etag = tag
             savedAtMs = System.currentTimeMillis()
-            return changed to removed
+            return Diff(changed, removed)
         }
     }
 
-    private fun fire(changed: Set<String>, removed: Set<String>) {
-        val snapshotFlags = synchronized(stateLock) { flags.toMap() }
-        for (key in changed) {
+    private fun fire(diff: Diff) {
+        // Changed values captured under the lock, so listeners can't observe a
+        // racing concurrent handshake's snapshot.
+        for ((key, decision) in diff.changed) {
             val bucket = listeners[key] ?: continue
-            val decision = snapshotFlags[key]
             synchronized(bucket) {
                 for (listener in bucket.values.toList()) {
                     runCatching { listener.onChange(decision) }
@@ -219,7 +225,7 @@ object SankofaSwitch : SankofaPluggableModule {
                 }
             }
         }
-        for (key in removed) {
+        for (key in diff.removed) {
             val bucket = listeners[key] ?: continue
             synchronized(bucket) {
                 for (listener in bucket.values.toList()) {

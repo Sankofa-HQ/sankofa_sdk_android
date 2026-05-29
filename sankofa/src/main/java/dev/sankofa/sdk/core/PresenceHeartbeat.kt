@@ -73,6 +73,16 @@ class PresenceHeartbeat private constructor(
         handler.removeCallbacks(tick)
     }
 
+    /** Detach from process lifecycle and stop the IO pool. Called by [Sankofa.shutdown]. */
+    private fun teardown() {
+        running = false
+        handler.removeCallbacks(tick)
+        handler.post {
+            runCatching { ProcessLifecycleOwner.get().lifecycle.removeObserver(this) }
+        }
+        ioPool.shutdownNow()
+    }
+
     private fun beat() {
         val screen = Sankofa.currentScreenName() ?: return
         val distinctId = Sankofa.distinctId() ?: return
@@ -109,10 +119,21 @@ class PresenceHeartbeat private constructor(
         /** Boot the heartbeat. Idempotent — repeat calls are no-ops. */
         @JvmStatic
         fun start(endpoint: String, apiKey: String) {
-            if (instance != null) return
-            val h = PresenceHeartbeat(endpoint, apiKey)
-            instance = h
-            h.start()
+            synchronized(this) {
+                if (instance != null) return
+                val h = PresenceHeartbeat(endpoint, apiKey)
+                instance = h
+                h.start()
+            }
+        }
+
+        /** Stop the heartbeat and release the singleton so a later [start] can boot a fresh one. */
+        @JvmStatic
+        fun stop() {
+            synchronized(this) {
+                instance?.teardown()
+                instance = null
+            }
         }
     }
 }

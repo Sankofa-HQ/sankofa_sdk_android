@@ -19,8 +19,13 @@ internal class SankofaIdentity(
     private val prefs: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    private var _anonymousId: String
-    private var _userId: String? = null
+    // Mutated by identify()/reset() on the IO pool and read lock-free from
+    // arbitrary threads (track, screen, presence). @Volatile guarantees those
+    // readers see the latest value; the [lock] makes the compound
+    // identify/reset updates atomic against each other.
+    @Volatile private var _anonymousId: String
+    @Volatile private var _userId: String? = null
+    private val lock = Any()
 
     init {
         _anonymousId = prefs.getString(KEY_ANON_ID, null) ?: run {
@@ -44,11 +49,13 @@ internal class SankofaIdentity(
      * Returns the alias event map, or null if the user is already identified with the same ID.
      */
     fun identify(userId: String): Map<String, Any>? {
-        if (_userId == userId) return null
-
-        val previousId = distinctId
-        _userId = userId
-        prefs.edit().putString(KEY_USER_ID, userId).apply()
+        val previousId: String
+        synchronized(lock) {
+            if (_userId == userId) return null
+            previousId = _userId ?: _anonymousId
+            _userId = userId
+            prefs.edit().putString(KEY_USER_ID, userId).apply()
+        }
 
         logger.debug("🔗 Identify: $previousId → $userId")
         return mapOf(
@@ -64,13 +71,17 @@ internal class SankofaIdentity(
      * Resets to a fresh anonymous identity. Clears the userId.
      */
     fun reset() {
-        _userId = null
-        _anonymousId = UUID.randomUUID().toString()
-        prefs.edit()
-            .remove(KEY_USER_ID)
-            .putString(KEY_ANON_ID, _anonymousId)
-            .apply()
-        logger.debug("🔄 Identity reset – new anon ID: $_anonymousId")
+        val newAnon: String
+        synchronized(lock) {
+            _userId = null
+            newAnon = UUID.randomUUID().toString()
+            _anonymousId = newAnon
+            prefs.edit()
+                .remove(KEY_USER_ID)
+                .putString(KEY_ANON_ID, newAnon)
+                .apply()
+        }
+        logger.debug("🔄 Identity reset – new anon ID: $newAnon")
     }
 
     companion object {

@@ -18,8 +18,22 @@ internal class SankofaSessionManager(
     private val prefs: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    private var _sessionId: String? = null
-    val sessionId: String get() = _sessionId ?: generateAndStoreSessionId()
+    @Volatile private var _sessionId: String? = null
+    private val idLock = Any()
+
+    /**
+     * The active session id. Lazily generated under [idLock] on first access so
+     * concurrent readers can't each mint a different id, and the result is
+     * cached in [_sessionId] (the previous implementation regenerated + stored
+     * a new id on every call until refresh() ran).
+     */
+    val sessionId: String
+        get() {
+            _sessionId?.let { return it }
+            return synchronized(idLock) {
+                _sessionId ?: generateAndStoreSessionId().also { _sessionId = it }
+            }
+        }
 
     /**
      * Checks whether the current session has expired based on background duration.
@@ -54,21 +68,28 @@ internal class SankofaSessionManager(
      * Standard refresh to ensure sessionId is ready.
      */
     suspend fun refresh() {
-        if (_sessionId == null) {
-            val stored = prefs.getString(KEY_SESSION_ID, null)
-            if (stored == null) {
-                startNewSession()
+        // Resolve (and assign) the session id under the lock, then fire the
+        // suspend callback OUTSIDE the lock — onNewSession can't be invoked
+        // while holding a monitor. A null result means the id was already set,
+        // so there's no new session to announce.
+        val toAnnounce: String? = synchronized(idLock) {
+            if (_sessionId != null) {
+                null
             } else {
-                _sessionId = stored
-                onNewSession(_sessionId!!)
+                val id = prefs.getString(KEY_SESSION_ID, null) ?: generateAndStoreSessionId()
+                _sessionId = id
+                id
             }
         }
+        toAnnounce?.let { onNewSession(it) }
     }
 
     /** Force-starts a new session regardless of timeout state. */
     suspend fun startNewSession() {
-        _sessionId = generateAndStoreSessionId()
-        onNewSession(_sessionId!!)
+        val id = synchronized(idLock) {
+            generateAndStoreSessionId().also { _sessionId = it }
+        }
+        onNewSession(id)
     }
 
     private fun generateAndStoreSessionId(): String {

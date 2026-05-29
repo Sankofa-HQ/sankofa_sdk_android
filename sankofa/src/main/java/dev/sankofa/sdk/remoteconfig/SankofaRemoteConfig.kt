@@ -77,9 +77,9 @@ object SankofaRemoteConfig : SankofaPluggableModule {
             ItemDecision.fromWire(value)?.let { incoming[key] = it }
         }
         val tag = config["etag"] as? String ?: ""
-        val (changed, removed) = diffAndApply(incoming, tag)
+        val diff = diffAndApply(incoming, tag)
         persistToStorage()
-        fire(changed, removed)
+        fire(diff)
     }
 
     /** Self-audit the host's Remote Config wiring. */
@@ -145,6 +145,22 @@ object SankofaRemoteConfig : SankofaPluggableModule {
         if (fallback is Long && raw is Number) return raw.toLong() as T
         if (fallback is Double && raw is Number) return raw.toDouble() as T
         if (fallback is Float && raw is Number) return raw.toFloat() as T
+        // Boolean coercion — a server bool can arrive as a JSON number (1/0,
+        // from the org.json cache path) or a string ("true"/"false"), not just
+        // a Kotlin Boolean. Without this, get("flag", false) on such a value
+        // silently fell through to the default.
+        if (fallback is Boolean) {
+            return when (raw) {
+                is Boolean -> raw as T
+                is Number -> (raw.toDouble() != 0.0) as T
+                is String -> when (raw.trim().lowercase()) {
+                    "true", "1" -> true as T
+                    "false", "0" -> false as T
+                    else -> null
+                }
+                else -> null
+            }
+        }
         // Fall-through: try the plain cast; null means "not compatible".
         return raw as? T
     }
@@ -191,28 +207,35 @@ object SankofaRemoteConfig : SankofaPluggableModule {
         values[key] ?: defaults[key]
     }
 
-    private fun diffAndApply(incoming: Map<String, ItemDecision>, tag: String): Pair<Set<String>, Set<String>> {
+    /** A computed diff with the changed values captured atomically under the lock. */
+    private class Diff(
+        val changed: Map<String, ItemDecision?>,
+        val removed: Set<String>,
+    )
+
+    private fun diffAndApply(incoming: Map<String, ItemDecision>, tag: String): Diff {
         synchronized(stateLock) {
-            val changed = mutableSetOf<String>()
+            val changed = LinkedHashMap<String, ItemDecision?>()
             val removed = mutableSetOf<String>()
             for (key in values.keys) {
                 if (!incoming.containsKey(key)) removed.add(key)
             }
             for ((key, decision) in incoming) {
-                if (values[key] != decision) changed.add(key)
+                if (values[key] != decision) changed[key] = decision
             }
             values = incoming.toMap()
             etag = tag
             savedAtMs = System.currentTimeMillis()
-            return changed to removed
+            return Diff(changed, removed)
         }
     }
 
-    private fun fire(changed: Set<String>, removed: Set<String>) {
-        val snapshot = synchronized(stateLock) { values.toMap() }
-        for (key in changed) {
+    private fun fire(diff: Diff) {
+        // The new value for each changed key was captured inside diffAndApply's
+        // lock, so listeners always see the value that this handshake actually
+        // installed — not whatever a racing concurrent handshake left behind.
+        for ((key, decision) in diff.changed) {
             val bucket = listeners[key] ?: continue
-            val decision = snapshot[key]
             synchronized(bucket) {
                 for (listener in bucket.values.toList()) {
                     runCatching { listener.onChange(decision) }
@@ -220,7 +243,7 @@ object SankofaRemoteConfig : SankofaPluggableModule {
                 }
             }
         }
-        for (key in removed) {
+        for (key in diff.removed) {
             val bucket = listeners[key] ?: continue
             synchronized(bucket) {
                 for (listener in bucket.values.toList()) {

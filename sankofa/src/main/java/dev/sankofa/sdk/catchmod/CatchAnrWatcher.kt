@@ -1,7 +1,9 @@
 package dev.sankofa.sdk.catchmod
 
+import android.os.Debug
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 
 /**
@@ -46,8 +48,11 @@ internal class CatchAnrWatcher(
 ) {
 
     @Volatile private var running = false
-    @Volatile private var lastProbeCompletedAt = System.currentTimeMillis()
-    @Volatile private var lastProbeStartedAt = System.currentTimeMillis()
+    // All timings use SystemClock.uptimeMillis() — unlike wall-clock time it
+    // does NOT advance while the device is in deep sleep / Doze, so a sleeping
+    // phone can't be mistaken for a stalled main thread.
+    @Volatile private var lastProbeCompletedAt = SystemClock.uptimeMillis()
+    @Volatile private var lastProbeStartedAt = SystemClock.uptimeMillis()
     @Volatile private var lastAnrReportedAt = 0L
 
     private var mainHandler: Handler? = null
@@ -73,10 +78,15 @@ internal class CatchAnrWatcher(
      */
     private fun runLoop() {
         while (running) {
-            val now = System.currentTimeMillis()
+            val now = SystemClock.uptimeMillis()
             val mainStalledFor = now - lastProbeCompletedAt
 
-            if (mainStalledFor >= anrThresholdMs && (now - lastAnrReportedAt) >= cooldownMs) {
+            // A connected debugger pauses the main thread arbitrarily; that's
+            // not an ANR, so don't cry wolf while someone is stepping code.
+            if (mainStalledFor >= anrThresholdMs &&
+                (now - lastAnrReportedAt) >= cooldownMs &&
+                !Debug.isDebuggerConnected()
+            ) {
                 try {
                     reportAnr(mainStalledFor)
                     lastAnrReportedAt = now
@@ -91,7 +101,7 @@ internal class CatchAnrWatcher(
             // sits in the queue and we notice next iteration.
             lastProbeStartedAt = now
             mainHandler?.post {
-                lastProbeCompletedAt = System.currentTimeMillis()
+                lastProbeCompletedAt = SystemClock.uptimeMillis()
             }
 
             try {

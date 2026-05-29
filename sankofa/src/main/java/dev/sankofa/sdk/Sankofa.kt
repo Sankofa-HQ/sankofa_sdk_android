@@ -22,6 +22,7 @@ import dev.sankofa.sdk.replay.ReplayUploader
 import dev.sankofa.sdk.util.SankofaLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.util.UUID
 import java.util.Date
@@ -69,7 +70,12 @@ object Sankofa {
 
     private var defaultProperties: Map<String, Any> = emptyMap()
     private var replayConfig: ReplayConfig? = null
-    private var isInitialized = false
+
+    // Written synchronously at the end of the sync part of init() (before any
+    // observer is registered) and read from arbitrary threads, so it must be
+    // @Volatile — otherwise other threads can miss the flip or, worse, see it
+    // true without seeing the lateinit field writes that precede it.
+    @Volatile private var isInitialized = false
 
     // Captured at init time — exposed so sibling modules (Catch,
     // Switch, Config) can authenticate their own API calls without
@@ -251,8 +257,21 @@ object Sankofa {
      */
     internal fun hasTaggedScreen(): Boolean = currentScreen.isNotEmpty()
 
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private var scope = CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
     private val gson = Gson()
+
+    /**
+     * Shared client for the handshake calls. Reused across sessions so we don't
+     * leak a connection pool + dispatcher thread-pool per session-start, and
+     * configured with explicit timeouts so a hung server can't block session
+     * bring-up indefinitely (the default client has no call timeout).
+     */
+    private val handshakeClient: okhttp3.OkHttpClient by lazy {
+        okhttp3.OkHttpClient.Builder()
+            .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+    }
 
     private var lastActivityHash: Int = 0
 
@@ -467,27 +486,12 @@ object Sankofa {
             )
         }
 
-        // Boot up
-        scope.launch {
-            sessionManager.refresh()
-
-            // First Time Open Logic
-            val prefs = appContext.getSharedPreferences("sankofa_internal", Context.MODE_PRIVATE)
-            val isFirstOpen = !prefs.getBoolean("first_open_detected", false)
-            if (isFirstOpen) {
-                prefs.edit().putBoolean("first_open_detected", true).apply()
-                track("\$app_open_first_time")
-            }
-
-            if (config.trackLifecycleEvents) {
-                track("\$app_opened")
-            }
-            
-            track("\$session_start")
-            
-            isInitialized = true
-            logger.debug("⚡ Sankofa initialized (debug=${config.debug})")
-        }
+        // Mark ready SYNCHRONOUSLY, before any observer is registered. Every
+        // lateinit field above is assigned by now, so this is the point where
+        // track()/screen() are safe. Doing it here (rather than inside the
+        // coroutine below) closes the window where the lifecycle observer or
+        // presence heartbeat could fire callbacks into a not-yet-ready SDK.
+        isInitialized = true
 
         lifecycleObserver.register()
 
@@ -496,6 +500,29 @@ object Sankofa {
         // foregrounded. Cheap one-tiny-POST-per-tick; paused on
         // ProcessLifecycle ON_STOP.
         dev.sankofa.sdk.core.PresenceHeartbeat.start(base, apiKey)
+
+        // Boot up — session refresh + first-run events on IO.
+        scope.launch {
+            sessionManager.refresh()
+
+            // First Time Open Logic. Enqueue the event BEFORE flipping the
+            // persisted flag so a process death between the two re-fires the
+            // event next launch rather than silently losing first-open.
+            val prefs = appContext.getSharedPreferences("sankofa_internal", Context.MODE_PRIVATE)
+            val isFirstOpen = !prefs.getBoolean("first_open_detected", false)
+            if (isFirstOpen) {
+                track("\$app_open_first_time")
+                prefs.edit().putBoolean("first_open_detected", true).apply()
+            }
+
+            if (config.trackLifecycleEvents) {
+                track("\$app_opened")
+            }
+
+            track("\$session_start")
+
+            logger.debug("⚡ Sankofa initialized (debug=${config.debug})")
+        }
     }
 
     // --- Public API ---
@@ -507,6 +534,10 @@ object Sankofa {
     @JvmStatic
     @JvmOverloads
     fun screen(name: String, properties: Map<String, Any> = emptyMap()) {
+        // Guard before touching identity/sessionManager below — calling screen()
+        // before init() would otherwise dereference unassigned lateinit fields
+        // and crash on the caller's (usually main) thread.
+        assertInitialized("screen") ?: return
         this.currentScreen = name
         this.isManualScreen = true
         track("\$screen_view", properties + mapOf("\$screen_name" to name))
@@ -537,13 +568,17 @@ object Sankofa {
     @JvmStatic
     @JvmOverloads
     fun track(eventName: String, properties: Map<String, Any> = emptyMap()) {
-        if (!isInitialized && eventName != "\$app_opened" && eventName != "\$app_open_first_time" && eventName != "\$session_start") {
-            logger.warn("❌ Sankofa.track() called before init()")
+        // isInitialized is set synchronously at the end of init(), after every
+        // lateinit field is assigned, so this single guard is enough to keep us
+        // from dereferencing an unassigned field. The logger may itself be
+        // unset if track() is called before init() ever ran, so guard it too.
+        if (!isInitialized) {
+            if (::logger.isInitialized) logger.warn("⚠️ Sankofa.track() called before init() — dropped \"$eventName\"")
             return
         }
 
         scope.launch {
-            if (isInitialized) sessionManager.refresh()
+            sessionManager.refresh()
 
             val event = buildMap<String, Any> {
                 put("type", "track")
@@ -556,18 +591,21 @@ object Sankofa {
                 })
                 put("default_properties", defaultProperties)
                 put("timestamp", currentIsoTimestamp())
-                put("lib_version", "android-0.1.0")
+                put("lib_version", SankofaVersion.LIB_VERSION)
                 put("message_id", UUID.randomUUID().toString())
             }
 
             queueManager.enqueue(event)
             logger.debug("📝 Tracked: $eventName")
 
-            // High-fidelity trigger check
+            // High-fidelity trigger check — a configured trigger event briefly
+            // switches the recorder to high-fidelity capture (the same path the
+            // server's CAPTURE_PRISTINE command uses) so the moments around a
+            // key event are recorded sharply.
             val rc = replayConfig
-            if (rc != null && rc.highFidelityTriggers.contains(eventName)) {
+            if (rc != null && rc.highFidelityTriggers.contains(eventName) && ::replayRecorder.isInitialized) {
                 logger.debug("🚀 High-fidelity trigger: $eventName")
-                // Future: switch replay to high-fidelity mode
+                replayRecorder.triggerHighFidelityMode(1000L)
             }
         }
     }
@@ -787,9 +825,31 @@ object Sankofa {
     @JvmStatic
     fun shutdown() {
         if (!isInitialized) return
+        // Flip the flag first so concurrent track()/screen() calls bail out
+        // while we tear down.
+        isInitialized = false
+
         lifecycleObserver.unregister()
         replayRecorder.destroy()
-        isInitialized = false
+
+        // Stop the presence heartbeat (otherwise its 15s POST loop runs
+        // forever) and cancel the IO scope so in-flight/queued work stops.
+        dev.sankofa.sdk.core.PresenceHeartbeat.stop()
+        scope.cancel()
+        // Fresh scope so a subsequent init() (the documented re-init case) has
+        // a live scope to launch on instead of a cancelled one.
+        scope = CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+
+        // Drop creds + cached handshake + screen state so a stale read after
+        // shutdown can't leak old config or credentials.
+        _apiKey = null
+        _endpoint = null
+        cachedHandshakeModules = null
+        handshakeEtag = ""
+        currentScreen = ""
+        isManualScreen = false
+        synchronized(this) { scrollOffsetProviders = emptyList() }
+
         logger.debug("🔌 Sankofa shut down")
     }
 
@@ -982,8 +1042,7 @@ object Sankofa {
             if (etagSnapshot.isNotEmpty()) {
                 requestBuilder.addHeader("If-None-Match", etagSnapshot)
             }
-            val client = okhttp3.OkHttpClient()
-            val response = client.newCall(requestBuilder.build()).execute()
+            val response = handshakeClient.newCall(requestBuilder.build()).execute()
 
             // 304 — cache still current. Re-fire the Traffic Cop so
             // modules registered between the previous handshake and
@@ -991,6 +1050,7 @@ object Sankofa {
             // late-initialised optional modules).
             val cached = cachedHandshakeModules
             if (response.code == 304 && cached != null) {
+                response.close()
                 logger.debug("🤝 Handshake 304 — cached modules still current")
                 dev.sankofa.sdk.core.SankofaModuleRegistry.routeHandshake(cached)
                 return cached
@@ -1002,14 +1062,18 @@ object Sankofa {
                 logger.debug("🤝 Handshake OK (project=${json["project_id"]}, installed=$installed)")
                 val modules = json["modules"] as? Map<String, Any?>
                 cachedHandshakeModules = modules
-                handshakeEtag = response.header("etag")
-                    ?: response.header("ETag")
-                    ?: ""
+                // Only persist the ETag when we actually cached modules. Caching
+                // the ETag with null modules would make the next request 304 with
+                // nothing to replay, permanently starving routeHandshake.
+                handshakeEtag = if (modules != null) {
+                    response.header("etag") ?: ""
+                } else ""
 
                 dev.sankofa.sdk.core.SankofaModuleRegistry.routeHandshake(modules)
 
                 modules
             } else {
+                response.close()
                 logger.debug("🤝 Handshake not available (${response.code}), falling back to legacy config")
                 fetchLegacyReplayConfig(apiKey, base)?.let { rc ->
                     mapOf("replay" to rc)
@@ -1029,11 +1093,12 @@ object Sankofa {
                 .url("$base/api/replay/config")
                 .addHeader("x-api-key", apiKey)
                 .build()
-            val response = okhttp3.OkHttpClient().newCall(okRequest).execute()
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: return null
-                gson.fromJson(body, Map::class.java) as? Map<*, *>
-            } else null
+            handshakeClient.newCall(okRequest).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: return null
+                    gson.fromJson(body, Map::class.java) as? Map<*, *>
+                } else null
+            }
         } catch (e: Exception) {
             logger.warn("⚠️ Legacy replay config fetch failed: ${e.message}")
             null
@@ -1042,7 +1107,7 @@ object Sankofa {
 
     private fun assertInitialized(method: String): Unit? {
         return if (!isInitialized) {
-            logger.warn("❌ Sankofa.$method() called before init()")
+            if (::logger.isInitialized) logger.warn("❌ Sankofa.$method() called before init()")
             null
         } else Unit
     }

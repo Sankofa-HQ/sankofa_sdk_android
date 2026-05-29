@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit
 object IntegrationReporter {
 
     private const val SDK_NAME = "android"
-    private const val SDK_VERSION = "1.0.0"
+    private const val SDK_VERSION = dev.sankofa.sdk.SankofaVersion.SDK_VERSION
     private val JSON = "application/json; charset=utf-8".toMediaType()
     private val gson = Gson()
 

@@ -120,6 +120,9 @@ object SankofaCatch : SankofaPluggableModule {
             // stops draining its queue. Without this, Android's own
             // ANR dialog is the first signal anyone gets that
             // something's wrong.
+            // Stop any watcher from a prior init() before replacing it, so a
+            // re-init doesn't leak the old daemon thread.
+            anrWatcher?.stop()
             anrWatcher = CatchAnrWatcher(capture = { exc ->
                 captureExceptionInternal(exc, type = "anr", level = CatchLevel.ERROR)
             }).also { it.start() }
@@ -140,6 +143,10 @@ object SankofaCatch : SankofaPluggableModule {
         synchronized(stateLock) {
             if (cfg.enabled == false) {
                 this.enabled = false
+                // Server turned Catch off — stop the ANR watchdog thread too,
+                // rather than leaving it spinning + walking stacks forever.
+                anrWatcher?.stop()
+                anrWatcher = null
                 return
             }
             this.enabled = true
@@ -325,7 +332,7 @@ object SankofaCatch : SankofaPluggableModule {
             level = level,
             type = type,
             platform = "android",
-            sdk = CatchSDKInfo(name = "sankofa.android", version = "android-0.1.0"),
+            sdk = CatchSDKInfo(name = "sankofa.android", version = dev.sankofa.sdk.SankofaVersion.LIB_VERSION),
             exception = exception,
             message = message,
             // Identity correlation — pulled from the core SDK so
@@ -385,7 +392,7 @@ object SankofaCatch : SankofaPluggableModule {
             level = level,
             type = type,
             platform = "android",
-            sdk = CatchSDKInfo(name = "sankofa.android", version = "android-0.1.0"),
+            sdk = CatchSDKInfo(name = "sankofa.android", version = dev.sankofa.sdk.SankofaVersion.LIB_VERSION),
             exception = exception,
             distinctId = dev.sankofa.sdk.Sankofa.distinctId(),
             anonId = dev.sankofa.sdk.Sankofa.anonymousId(),
@@ -623,7 +630,7 @@ object SankofaCatch : SankofaPluggableModule {
                     level = CatchLevel.FATAL,
                     type = "unhandled_exception",
                     platform = "android",
-                    sdk = CatchSDKInfo(name = "sankofa.android", version = "android-0.1.0"),
+                    sdk = CatchSDKInfo(name = "sankofa.android", version = dev.sankofa.sdk.SankofaVersion.LIB_VERSION),
                     exception = CatchStackBuilder.fromThrowable(
                         throwable,
                         CatchMechanism(type = "uncaught_exception_handler", handled = false, description = "thread=${thread.name}"),

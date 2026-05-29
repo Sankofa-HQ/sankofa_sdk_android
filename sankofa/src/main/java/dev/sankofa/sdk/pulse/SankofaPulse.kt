@@ -341,15 +341,22 @@ object SankofaPulse : SankofaPluggableModule {
             } else null
             val translator = PulseTranslator.build(bundle.translations)
             postToMain {
-                if (!activity.isFinishing) {
-                    present(
-                        survey = bundle.survey,
-                        branchingRules = bundle.branchingRules,
-                        translator = translator,
-                        initialAnswers = partial?.answers ?: emptyMap(),
-                        initialQuestionId = partial?.currentQuestionId,
-                        activity = activity,
-                    )
+                // Guard against a finishing/destroyed Activity — showing a
+                // Dialog on a dead window throws BadTokenException. The window
+                // can also die between this check and dialog.show() (config
+                // change / backgrounding), so wrap the present in runCatching
+                // and never crash the host over a survey.
+                if (!activity.isFinishing && !activity.isDestroyed) {
+                    runCatching {
+                        present(
+                            survey = bundle.survey,
+                            branchingRules = bundle.branchingRules,
+                            translator = translator,
+                            initialAnswers = partial?.answers ?: emptyMap(),
+                            initialQuestionId = partial?.currentQuestionId,
+                            activity = activity,
+                        )
+                    }.onFailure { Log.w(TAG, "show($surveyId) — could not present: ${it.message}") }
                 }
             }
         }
