@@ -28,7 +28,15 @@ internal abstract class AppDatabase : RoomDatabase() {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room
                     .databaseBuilder(context.applicationContext, AppDatabase::class.java, DB_NAME)
-                    .fallbackToDestructiveMigration() // SDK events are transient; safe to drop on schema change
+                    // When the schema version below is bumped, ALWAYS add the
+                    // corresponding Migration via .addMigrations(...) so queued
+                    // (unsent) events survive the app update. The destructive
+                    // fallback is only a last-resort backstop for an unforeseen
+                    // downgrade/corruption — it must never be the planned path,
+                    // because dropping the queue silently loses analytics. It is
+                    // kept (rather than removed) so a missing migration degrades
+                    // to "lose transient events" instead of "crash the host app".
+                    .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }
             }

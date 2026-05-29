@@ -26,4 +26,12 @@ internal interface EventDao {
     /** Returns the total number of queued events for threshold checks. */
     @Query("SELECT COUNT(*) FROM events_queue")
     suspend fun countEvents(): Int
+
+    /** Drops events created before [cutoff] (epoch millis) — stale-event TTL eviction. */
+    @Query("DELETE FROM events_queue WHERE createdAt < :cutoff")
+    suspend fun deleteOlderThan(cutoff: Long)
+
+    /** Drops the [count] oldest events — used to enforce the hard queue-size cap. */
+    @Query("DELETE FROM events_queue WHERE id IN (SELECT id FROM events_queue ORDER BY createdAt ASC LIMIT :count)")
+    suspend fun deleteOldest(count: Int)
 }

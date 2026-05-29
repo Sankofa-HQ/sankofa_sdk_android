@@ -15,7 +15,6 @@ import dev.sankofa.sdk.data.EventQueueManager
 import dev.sankofa.sdk.network.SankofaHttpClient
 import dev.sankofa.sdk.network.SyncWorker
 import dev.sankofa.sdk.network.SankofaCommand
-import dev.sankofa.sdk.network.SankofaResponse
 import dev.sankofa.sdk.replay.BitmapPool
 import dev.sankofa.sdk.replay.ReplayConfig
 import dev.sankofa.sdk.replay.ReplayRecorder
@@ -381,11 +380,13 @@ object Sankofa {
         val base = config.endpoint.trimEnd('/')
         httpClient = SankofaHttpClient(
             apiKey = apiKey,
-            trackEndpoint = "$base/api/v1/track",
-            aliasEndpoint = "$base/api/v1/alias",
-            peopleEndpoint = "$base/api/v1/people",
+            batchEndpoint = "$base/api/v1/batch",
             logger = logger,
         )
+
+        // Persist the minimum config a backgrounded SyncWorker needs to rebuild
+        // a queue manager in a fresh process after the app is killed.
+        SyncWorker.persistConfig(appContext, apiKey, base)
 
         queueManager = EventQueueManager(
             context = appContext,

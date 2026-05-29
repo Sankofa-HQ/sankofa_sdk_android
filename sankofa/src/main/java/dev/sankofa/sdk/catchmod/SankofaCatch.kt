@@ -531,35 +531,75 @@ object SankofaCatch : SankofaPluggableModule {
 
     private fun hydrateFromStorage() {
         val raw = prefs?.getString(KEY_QUEUE, null) ?: return
-        try {
-            val arr = org.json.JSONArray(raw)
-            // In M1 we only persist the RAW JSON payload — full
-            // parsing + reconstruction would be expensive and
-            // error-prone. Simpler: we drop persisted events on
-            // restart if they're older than 24h, and we don't
-            // attempt to decode back. Host apps that need cold-start
-            // crash survival will get the full serialiser in M2.1.
-            if (arr.length() > 0) {
-                Log.i(TAG, "persisted queue present (${arr.length()} entries) — clearing on init")
-                prefs?.edit()?.remove(KEY_QUEUE)?.apply()
-            }
-        } catch (_: Throwable) {
-            prefs?.edit()?.remove(KEY_QUEUE)?.apply()
-        }
-    }
-
-    private fun persistToStorage() {
-        val snapshot = buffer.toList()
-        if (snapshot.isEmpty()) {
+        if (raw.isBlank()) {
             prefs?.edit()?.remove(KEY_QUEUE)?.apply()
             return
         }
-        var serialised = CatchJson.encodeBatch(snapshot)
-        while (serialised.length > MAX_QUEUE_BYTES && buffer.size > 1) {
-            buffer.pollFirst()
-            serialised = CatchJson.encodeBatch(buffer.toList())
+        // The persisted blob is already the exact `/api/catch/events` wire body
+        // (`CatchJson.encodeBatch` → `{ wire_version, events: [...] }`). Rather
+        // than decode it back into CatchEvents, we resend it verbatim so a fatal
+        // crash that happened while offline survives a cold start. This runs off
+        // the init thread so a slow network never blocks SDK bring-up.
+        Thread {
+            val delivered = resendPersistedBatch(raw)
+            if (delivered) {
+                prefs?.edit()?.remove(KEY_QUEUE)?.apply()
+            }
+        }.apply {
+            name = "sankofa-catch-hydrate"
+            isDaemon = true
+        }.start()
+    }
+
+    /**
+     * POSTs an already-serialised persisted crash batch to the Catch ingest
+     * endpoint. Returns true when the batch was delivered or permanently
+     * rejected (so it can be cleared); false on a transient failure (5xx /
+     * network / no credentials yet), leaving it on disk for the next launch.
+     */
+    private fun resendPersistedBatch(rawBody: String): Boolean {
+        val endpoint = Sankofa.endpoint() ?: return false
+        val apiKey = Sankofa.apiKey() ?: return false
+        return try {
+            val url = URL("${endpoint.trimEnd('/')}/api/catch/events")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("x-api-key", apiKey)
+            conn.connectTimeout = 5_000
+            conn.readTimeout = 10_000
+            conn.outputStream.use { it.write(rawBody.toByteArray()) }
+            val code = conn.responseCode
+            conn.disconnect()
+            // 2xx / 4xx → clear (delivered or unrecoverable); 5xx → keep for retry.
+            code < 500
+        } catch (err: Throwable) {
+            Log.w(TAG, "resend persisted crash batch failed: ${err.message}")
+            false
         }
-        prefs?.edit()?.putString(KEY_QUEUE, serialised)?.apply()
+    }
+
+    /**
+     * @param sync when true, the write is flushed synchronously via `commit()`.
+     * The uncaught-exception handler MUST use this — `apply()` schedules the
+     * disk write on a background thread that the imminent process death would
+     * kill mid-flight, losing the very crash we're trying to persist.
+     */
+    private fun persistToStorage(sync: Boolean = false) {
+        val editor = prefs?.edit() ?: return
+        val snapshot = buffer.toList()
+        if (snapshot.isEmpty()) {
+            editor.remove(KEY_QUEUE)
+        } else {
+            var serialised = CatchJson.encodeBatch(snapshot)
+            while (serialised.length > MAX_QUEUE_BYTES && buffer.size > 1) {
+                buffer.pollFirst()
+                serialised = CatchJson.encodeBatch(buffer.toList())
+            }
+            editor.putString(KEY_QUEUE, serialised)
+        }
+        if (sync) editor.commit() else editor.apply()
     }
 
     // ── Global handler ─────────────────────────────────────────
@@ -594,9 +634,13 @@ object SankofaCatch : SankofaPluggableModule {
                     debugMeta = CatchDebugMetaCapture.capture(),
                 )
                 buffer.addFirst(event)
-                persistToStorage()
+                // Synchronous commit — the process is about to die, so an
+                // async apply() would lose the write. This is the durable
+                // record; the network flush below is best-effort on top.
+                persistToStorage(sync = true)
                 // Best-effort synchronous flush so the event lands
-                // before the process dies.
+                // before the process dies. If it fails (offline / hung
+                // socket), the committed copy above is resent on next launch.
                 flushInternal()
             } catch (err: Throwable) {
                 Log.e(TAG, "uncaught handler itself threw: ${err.message}")
