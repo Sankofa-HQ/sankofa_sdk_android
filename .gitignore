@@ -34,3 +34,6 @@ sankofa/build/test-results/
 
 # ProGuard mapping files (generated per release)
 *.map
+
+# JVM heap dumps (e.g. Gradle daemon OOM)
+*.hprof
