@@ -11,7 +11,7 @@ package dev.sankofa.sdk
 internal object SankofaVersion {
 
     /** Bare semantic version, matching the published Maven artifact. */
-    const val SDK_VERSION = "1.0.0"
+    const val SDK_VERSION = "2.0.0"
 
     /** Platform-prefixed form used as the event `lib_version` and Catch SDK info. */
     const val LIB_VERSION = "android-$SDK_VERSION"

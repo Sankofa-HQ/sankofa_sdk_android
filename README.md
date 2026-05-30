@@ -25,7 +25,7 @@ The official Android SDK for [Sankofa](https://sankofa.dev). Six products in one
 
 ```kotlin
 dependencies {
-    implementation("dev.sankofa.sdk:sankofa-android:1.0.0")
+    implementation("dev.sankofa.sdk:sankofa-android:2.0.0")
 }
 ```
 

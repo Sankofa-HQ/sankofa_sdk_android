@@ -94,7 +94,7 @@ afterEvaluate {
             register<MavenPublication>("release") {
                 groupId = "dev.sankofa.sdk"
                 artifactId = "sankofa-android"
-                version = "1.0.0"
+                version = "2.0.0"
 
                 // FIX 1: Removed the nested afterEvaluate
                 from(components["release"])
