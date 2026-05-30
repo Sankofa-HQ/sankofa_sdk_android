@@ -1,9 +1,14 @@
 package dev.sankofa.sdk.pulse
 
 import android.app.Activity
+import android.app.Application
 import android.content.Context
 import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import java.lang.ref.WeakReference
 import dev.sankofa.sdk.Sankofa
 import dev.sankofa.sdk.core.SankofaModuleName
 import dev.sankofa.sdk.core.SankofaModuleRegistry
@@ -47,6 +52,9 @@ object SankofaPulse : SankofaPluggableModule {
 
     private const val TAG = "SankofaPulse"
 
+    /** Default dismiss cooldown when the server omits one — 7 days (matches iOS). */
+    private const val DEFAULT_COOLDOWN_SECONDS = 7 * 24 * 60 * 60
+
     override val canonicalName: SankofaModuleName = SankofaModuleName.PULSE
 
     private val stateLock = Any()
@@ -67,6 +75,36 @@ object SankofaPulse : SankofaPluggableModule {
     private var cachedTargeting:
         Map<String, List<dev.sankofa.sdk.pulse.targeting.PulseTargetingRule>> =
             emptyMap()
+
+    /** Per-survey display behaviour (auto_show / cooldown / delay), populated
+     *  alongside [cachedSurveys]. Drives [maybeAutoShow]. Mirrors iOS. */
+    @Volatile private var cachedDisplay: Map<String, SurveyDisplay> = emptyMap()
+
+    /** Survey ids already auto-shown this process, so a foreground/screen
+     *  re-trigger doesn't re-present the same survey on a zero cooldown. */
+    private val autoShownThisSession: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf())
+
+    /** Master switch for auto-show — mirrors the web `autoShow:false` opt-out. */
+    @Volatile var autoShowEnabled: Boolean = true
+
+    /** A survey dialog is currently on screen — suppresses auto-show stacking. */
+    @Volatile private var presenting: Boolean = false
+
+    /** Foreground activity used as the auto-show presenter. */
+    @Volatile private var currentActivity: WeakReference<Activity>? = null
+
+    /** True once the activity-lifecycle observer has been installed. */
+    @Volatile private var lifecycleHooked: Boolean = false
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** Per-survey display behaviour resolved from the summary. */
+    private data class SurveyDisplay(
+        val autoShow: Boolean,
+        val cooldownSeconds: Int,
+        val delayMs: Int,
+    )
 
     /**
      * Lifecycle event listener registry. Buckets are per-event so an
@@ -110,6 +148,9 @@ object SankofaPulse : SankofaPluggableModule {
             this.registered = true
         }
         SankofaModuleRegistry.register(this)
+        // Auto-show pump: track the foreground activity and re-evaluate on
+        // every resume, mirroring iOS (foreground + screen-change triggers).
+        installAutoShowHook(context.applicationContext)
         // First refresh fires off-thread so the host's onCreate() returns
         // immediately. Subsequent refreshes are driven by the Traffic Cop
         // every time a fresh handshake lands.
@@ -469,12 +510,17 @@ object SankofaPulse : SankofaPluggableModule {
                 // best-effort client-side delete so dismissed-then-
                 // resumed-in-a-different-session doesn't surface a
                 // stale partial during the brief window.
+                presenting = false
                 handleSubmit(enrichContext(payload), surveyId = survey.id)
                 if (externalId.isNotEmpty()) {
                     deletePartialAsync(survey.id, externalId)
                 }
             },
             onDismiss = {
+                presenting = false
+                // Stamp the dismiss so the auto-show pump honours the
+                // per-survey cooldown and doesn't re-present immediately.
+                stampDismiss(survey.id)
                 emit(PulseEventPayload(
                     event = PulseEvent.SURVEY_DISMISSED,
                     surveyId = survey.id,
@@ -482,11 +528,116 @@ object SankofaPulse : SankofaPluggableModule {
                 /* keep partial intact for resume */
             },
         )
+        presenting = true
         dialog.show()
         emit(PulseEventPayload(
             event = PulseEvent.SURVEY_SHOWN,
             surveyId = survey.id,
         ))
+    }
+
+    // ── Auto-show ───────────────────────────────────────────────────
+    //
+    // Mirrors the iOS pump: track the foreground activity and, on each
+    // resume (and after each fetch), present the first eligible survey
+    // flagged `auto_show` that isn't inside its dismiss cooldown and
+    // hasn't already shown this session. Without this, dashboard surveys
+    // with auto_show=true never appear on Android — there's no automatic
+    // trigger, only manual show().
+
+    private fun installAutoShowHook(appContext: Context) {
+        if (lifecycleHooked) return
+        val app = appContext as? Application ?: run {
+            Log.w(TAG, "auto-show disabled — applicationContext is not an Application")
+            return
+        }
+        lifecycleHooked = true
+        app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityResumed(activity: Activity) {
+                currentActivity = WeakReference(activity)
+                maybeAutoShow()
+            }
+            override fun onActivityPaused(activity: Activity) {
+                if (currentActivity?.get() === activity) currentActivity = null
+            }
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityStarted(activity: Activity) {}
+            override fun onActivityStopped(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
+        })
+    }
+
+    /**
+     * Re-evaluate auto-show. Picks the first eligible survey flagged
+     * `auto_show` that isn't inside its dismiss cooldown and hasn't shown
+     * this session, then presents it (after `display_delay_ms`) from the
+     * foreground activity. Safe to call repeatedly — a no-op while a survey
+     * is already on screen or nothing's eligible. Opt out with
+     * [autoShowEnabled].
+     */
+    @JvmStatic
+    fun maybeAutoShow() {
+        if (!registered || !enabled || !autoShowEnabled || presenting) return
+        val activity = currentActivity?.get() ?: return
+        if (activity.isFinishing || activity.isDestroyed) return
+
+        val surveys = cachedSurveys
+        if (surveys.isEmpty()) return
+        val display = cachedDisplay
+        val respondent = Sankofa.distinctId().orEmpty()
+
+        val candidate = surveys.firstOrNull { s ->
+            if (autoShownThisSession.contains(s.id)) return@firstOrNull false
+            val d = display[s.id]
+            if (d != null && !d.autoShow) return@firstOrNull false
+            val rules = cachedTargeting[s.id] ?: emptyList()
+            if (!evaluateLocally(s.id, rules, emptyMap(), emptyMap()).eligible) {
+                return@firstOrNull false
+            }
+            val cooldown = d?.cooldownSeconds ?: DEFAULT_COOLDOWN_SECONDS
+            !isRecentlyDismissed(s.id, respondent, cooldown)
+        } ?: return
+
+        // Mark before presenting so a re-trigger during the bundle fetch
+        // doesn't double-present the same survey.
+        autoShownThisSession.add(candidate.id)
+        val delayMs = (display[candidate.id]?.delayMs ?: 0).toLong()
+        val present = Runnable {
+            val act = currentActivity?.get() ?: return@Runnable
+            if (!presenting && !act.isFinishing && !act.isDestroyed) {
+                show(candidate.id, act)
+            }
+        }
+        if (delayMs > 0) mainHandler.postDelayed(present, delayMs) else postToMain { present.run() }
+    }
+
+    // ── Dismiss cooldown (mirrors iOS / web `sankofa.pulse.dismissed.*`) ──
+
+    private fun dismissPrefs(): android.content.SharedPreferences? =
+        appContext?.getSharedPreferences("sankofa_pulse_cooldown", Context.MODE_PRIVATE)
+
+    private fun dismissKey(surveyId: String, respondentId: String) =
+        "dismissed.$respondentId.$surveyId"
+
+    /** Whether [surveyId] was dismissed within its cooldown window for the
+     *  current respondent. A non-positive cooldown never suppresses. */
+    private fun isRecentlyDismissed(
+        surveyId: String,
+        respondentId: String,
+        cooldownSeconds: Int,
+    ): Boolean {
+        if (cooldownSeconds <= 0) return false
+        val ts = dismissPrefs()?.getLong(dismissKey(surveyId, respondentId), 0L) ?: 0L
+        if (ts <= 0L) return false
+        return System.currentTimeMillis() - ts < cooldownSeconds * 1000L
+    }
+
+    private fun stampDismiss(surveyId: String) {
+        val respondent = Sankofa.distinctId().orEmpty()
+        dismissPrefs()?.edit()
+            ?.putLong(dismissKey(surveyId, respondent), System.currentTimeMillis())
+            ?.apply()
     }
 
     // ── Partial save scheduler ──────────────────────────────────────
@@ -617,12 +768,23 @@ object SankofaPulse : SankofaPluggableModule {
                     cachedTargeting = summaries.associate {
                         it.id to it.targetingRules
                     }
+                    cachedDisplay = summaries.associate {
+                        it.id to SurveyDisplay(
+                            autoShow = it.autoShow,
+                            cooldownSeconds = it.displayCooldownSeconds,
+                            delayMs = it.displayDelayMs,
+                        )
+                    }
                 } else {
                     val resp = c.handshake()
                     cachedSurveys = resp.surveys
                     cachedTargeting = emptyMap()
+                    cachedDisplay = emptyMap()
                 }
                 queue?.let { drainQueueLocked(it, c) }
+                // A fresh list on a visible screen should present an eligible
+                // auto_show survey immediately, not wait for the next resume.
+                maybeAutoShow()
             } catch (e: Throwable) {
                 // First-launch refresh failures are common (offline,
                 // proxy, captive portal) — log at debug, retry on the
