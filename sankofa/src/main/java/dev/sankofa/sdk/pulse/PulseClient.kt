@@ -215,10 +215,17 @@ internal class PulseClient(
             }
             out
         }
-        // The bundle survey row doesn't carry questions on the Go
-        // wire — we attach them here so callers see one self-contained
-        // PulseSurvey.
-        val merged = survey.copy(questions = questions)
+        // The bundle survey row carries neither questions NOR theme on the
+        // Go wire — both ship on sibling keys. Attach them here so callers
+        // see one self-contained PulseSurvey. Without folding the sibling
+        // theme, surveys always rendered with the default palette even when
+        // the dashboard set custom colors.
+        val theme: PulseTheme? = if (raw["theme"] is Map<*, *>) {
+            gson.fromJson(gson.toJson(raw["theme"]), PulseTheme::class.java)
+        } else {
+            survey.theme
+        }
+        val merged = survey.copy(questions = questions, theme = theme)
         return PulseSurveyBundle(
             survey = merged,
             targetingRules = targetingRules,
