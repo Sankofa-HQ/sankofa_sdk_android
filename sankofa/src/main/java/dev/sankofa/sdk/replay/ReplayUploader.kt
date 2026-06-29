@@ -193,6 +193,14 @@ internal class ReplayUploader(
             payload["events"] = eventsAttemptingUpload
         }
 
+        // Authoritative chunk span + count (epoch ms) from the frames' own
+        // capture timestamps, so the server reports the real session duration
+        // (idle gaps between chunks included via max(ended)-min(started)) instead
+        // of inferring it from upload cadence. Buffer is non-empty here.
+        payload["_started_at_ms"] = framesAttemptingUpload.minOf { it.timestampMs }
+        payload["_ended_at_ms"] = framesAttemptingUpload.maxOf { it.timestampMs }
+        payload["_event_count"] = frames.size + eventsAttemptingUpload.size
+
         val url = "$replayEndpoint/api/ee/replay/chunk"
         val headers = mapOf(
             "X-Session-Id" to sessionId,
