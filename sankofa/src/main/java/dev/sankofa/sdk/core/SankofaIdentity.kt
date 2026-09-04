@@ -50,11 +50,23 @@ internal class SankofaIdentity(
      */
     fun identify(userId: String): Map<String, Any>? {
         val previousId: String
+        val wasAnonymous: Boolean
         synchronized(lock) {
             if (_userId == userId) return null
+            wasAnonymous = _userId == null
             previousId = _userId ?: _anonymousId
             _userId = userId
             prefs.edit().putString(KEY_USER_ID, userId).apply()
+        }
+
+        // Only alias an ANONYMOUS session onto the new user. If a DIFFERENT user
+        // was already identified (the app switched accounts without reset()),
+        // previousId is that prior USER — emitting alias previousId → userId would
+        // merge two real accounts. Switch the active identity but emit NO alias;
+        // call reset() on logout for a clean anonymous session. (Mirrors web SDK.)
+        if (!wasAnonymous) {
+            logger.debug("🔀 Identify: switched $previousId → $userId (no alias; call reset() on logout to avoid merging accounts)")
+            return null
         }
 
         logger.debug("🔗 Identify: $previousId → $userId")
